@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 # ────────────────────────────────────────────
 
 def check_password():
-if “authenticated” not in st.session_state:
+if "authenticated" not in st.session_state:
 st.session_state.authenticated = False
 if st.session_state.authenticated:
 return True
