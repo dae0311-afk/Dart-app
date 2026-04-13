@@ -5,6 +5,31 @@ import zipfile
 import io
 import xml.etree.ElementTree as ET
 import plotly.graph_objects as go
+import time
+
+
+# ── 재시도 래퍼 ──────────────────────────────────────────────────────────────
+def requests_get_with_retry(url, params=None, timeout=60, max_retries=3):
+    """
+    ConnectTimeout / ConnectionError 발생 시 최대 max_retries회 재시도.
+    Streamlit Cloud(해외 서버)에서 DART 서버 연결 실패를 방어.
+    """
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except (requests.exceptions.ConnectTimeout,
+                requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError) as e:
+            last_exc = e
+            if attempt < max_retries:
+                wait = attempt * 3          # 3초, 6초, 9초 간격
+                time.sleep(wait)
+        except requests.exceptions.HTTPError as e:
+            raise e                         # HTTP 오류는 재시도 불필요
+    raise last_exc                          # 모든 재시도 실패 시 예외 전파
 
 st.set_page_config(page_title="DART", page_icon="📈", layout="wide")
 
@@ -110,11 +135,10 @@ def fmt_pct(val):
 
 
 # ── DART API 호출 ────────────────────────────────────────────────────────────
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)   # 24시간 캐시 (대용량 ZIP, 자주 변경 안 됨)
 def get_corp_list():
     url = "https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=" + API_KEY
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
+    r = requests_get_with_retry(url, timeout=90, max_retries=3)
     z = zipfile.ZipFile(io.BytesIO(r.content))
     root = ET.fromstring(z.read("CORPCODE.xml"))
     corps = []
@@ -132,31 +156,37 @@ def search_corp(name, df):
 
 
 def get_corp_info(corp_code):
-    r = requests.get(
-        "https://opendart.fss.or.kr/api/company.json",
-        params={"crtfc_key": API_KEY, "corp_code": corp_code},
-        timeout=15,
-    )
-    return r.json()
+    try:
+        r = requests_get_with_retry(
+            "https://opendart.fss.or.kr/api/company.json",
+            params={"crtfc_key": API_KEY, "corp_code": corp_code},
+            timeout=30,
+        )
+        return r.json()
+    except Exception:
+        return {}
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=3600)
 def get_fs(corp_code, year, report_code, fs_div):
-    r = requests.get(
-        "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json",
-        params={
-            "crtfc_key":  API_KEY,
-            "corp_code":  corp_code,
-            "bsns_year":  year,
-            "reprt_code": report_code,
-            "fs_div":     fs_div,
-        },
-        timeout=30,
-    )
-    data = r.json()
-    if data.get("status") != "000":
-        return None, data.get("message", "fail")
-    return pd.DataFrame(data["list"]), None
+    try:
+        r = requests_get_with_retry(
+            "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json",
+            params={
+                "crtfc_key":  API_KEY,
+                "corp_code":  corp_code,
+                "bsns_year":  year,
+                "reprt_code": report_code,
+                "fs_div":     fs_div,
+            },
+            timeout=60,
+        )
+        data = r.json()
+        if data.get("status") != "000":
+            return None, data.get("message", "fail")
+        return pd.DataFrame(data["list"]), None
+    except Exception as e:
+        return None, str(e)
 
 
 def find_val(df, ids, col="thstrm_amount"):
@@ -361,25 +391,40 @@ with st.form("search_form"):
         search_btn = st.form_submit_button("검색", use_container_width=True, type="primary")
 
 if search_btn and q:
-    with st.spinner("로딩 중..."):
-        corp_df = get_corp_list()
-    res = search_corp(q, corp_df)
-    if res.empty:
-        st.warning("해당 기업을 찾을 수 없습니다.")
-    else:
-        ceo_list = []
-        for _, row in res.iterrows():
-            info = get_corp_info(row["corp_code"])
-            ceo_list.append(info.get("ceo_nm", "-") if info.get("status") == "000" else "-")
-        res = res.copy()
-        res["대표자"] = ceo_list
-        st.success("{0}개 기업 검색됨".format(len(res)))
-        disp = res.copy()
-        disp["상장여부"] = disp["stock_code"].apply(lambda x: "상장" if x else "비상장")
-        disp = disp.rename(columns={"corp_name": "기업명", "stock_code": "종목코드"})
-        st.dataframe(disp[["기업명", "대표자", "종목코드", "상장여부"]],
-                     use_container_width=True, hide_index=True)
-        st.session_state["search_results"] = res
+    try:
+        with st.spinner("기업 목록 로딩 중... (최초 1회, 최대 90초 소요)"):
+            corp_df = get_corp_list()
+        res = search_corp(q, corp_df)
+        if res.empty:
+            st.warning("해당 기업을 찾을 수 없습니다.")
+        else:
+            ceo_list = []
+            for _, row in res.iterrows():
+                info = get_corp_info(row["corp_code"])
+                ceo_list.append(info.get("ceo_nm", "-") if info.get("status") == "000" else "-")
+            res = res.copy()
+            res["대표자"] = ceo_list
+            st.success("{0}개 기업 검색됨".format(len(res)))
+            disp = res.copy()
+            disp["상장여부"] = disp["stock_code"].apply(lambda x: "상장" if x else "비상장")
+            disp = disp.rename(columns={"corp_name": "기업명", "stock_code": "종목코드"})
+            st.dataframe(disp[["기업명", "대표자", "종목코드", "상장여부"]],
+                         use_container_width=True, hide_index=True)
+            st.session_state["search_results"] = res
+    except Exception as e:
+        err_str = str(e)
+        if "Timeout" in err_str or "Connect" in err_str or "timed out" in err_str.lower():
+            st.error(
+                "⏱️ DART 서버 연결 시간 초과 (3회 재시도 모두 실패)\n\n"
+                "**원인:** Streamlit Cloud(해외 서버)에서 DART 서버 접속이 지연됩니다.\n\n"
+                "**해결 방법 1:** 잠시 후 새로고침 → 재검색\n\n"
+                "**해결 방법 2 (근본 해결):** 로컬 PC에서 실행\n"
+                "```bash\n"
+                "streamlit run app.py\n"
+                "```"
+            )
+        else:
+            st.error("오류 발생: " + err_str)
 
 # ── 기업 선택 및 구 사명 추가 ────────────────────────────────────────────────
 if "search_results" in st.session_state and not st.session_state["search_results"].empty:
