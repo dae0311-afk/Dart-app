@@ -14,11 +14,33 @@ st.set_page_config(page_title="DART 재무 분석", page_icon="📈", layout="wi
 # ── 전역 CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* 기간선택 버튼 소형화 */
-div[data-testid="column"] button[kind="secondary"] {
-    padding: 2px 6px !important;
+/* ── 기업 선택 라디오 → 테이블 행처럼 ── */
+div[data-testid="stRadio"] > label { display:none !important; }
+div[data-testid="stRadio"] > div   { gap:0 !important; border:1px solid #d0d3da; border-radius:6px; overflow:hidden; }
+div[data-testid="stRadio"] > div > label {
+    display: grid !important;
+    grid-template-columns: 28% 16% 40% 16%;
+    padding: 8px 12px !important;
+    margin: 0 !important;
+    border-bottom: 1px solid #e8eaed !important;
+    cursor: pointer !important;
+    font-size: 0.84rem !important;
+    background: #f8f9fb;
+    color: #1a1a2e;
+    transition: background 0.12s;
+}
+div[data-testid="stRadio"] > div > label:last-child { border-bottom: none !important; }
+div[data-testid="stRadio"] > div > label:hover { background:#e74c3c !important; color:#fff !important; }
+div[data-testid="stRadio"] > div > label:has(input:checked) { background:#e74c3c !important; color:#fff !important; font-weight:700 !important; }
+/* radio 원 숨김 */
+div[data-testid="stRadio"] > div > label > div:first-child { display:none !important; }
+
+/* ── 기간/단위 버튼 소형화 ── */
+.period-btn button, .unit-btn button {
+    padding: 3px 8px !important;
     font-size: 0.78rem !important;
-    min-height: 28px !important;
+    min-height: 30px !important;
+    border-radius: 4px !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -538,33 +560,50 @@ def analyze(corp_code, year, fs_preference="CFS"):
     return analyze_from_document(corp_code, year)
 
 
-def build_table(year_data):
+def build_table(year_data, display_unit=int(1e8)):
+    """display_unit: 표시 단위 (원 기준). 기본=억원(1e8)."""
     years = sorted(year_data.keys())
     ROW_ORDER = ["매출액","Growth","매출원가","매출원가율","매출총이익","매출총이익률",
                  "판관비","판관비율","EBITDA","EBITDA Margin","영업이익","영업이익률",
                  "당기순이익","순이익률","자산총계","현금성자산","부채총계","총차입금","자본총계"]
     table = {r:{} for r in ROW_ORDER}
     sp = lambda a,b: fmt_pct(a/b*100) if (a is not None and b and b!=0) else "-"
+
+    def fv(val):
+        """원 단위 값을 display_unit으로 나누어 포맷."""
+        if val is None: return "-"
+        v = val / display_unit
+        if abs(v) < 0.01 and v != 0: return "{:.4f}".format(v)
+        if abs(v) < 1: return "{:.2f}".format(v)
+        return "{:,.0f}".format(v)
+
+    def to_d(val):
+        return None if val is None else val / display_unit
+
     for i, year in enumerate(years):
         d = year_data[year]
-        rv=to_uk(d.get("매출액")); cg=to_uk(d.get("매출원가"))
-        gp=to_uk(d.get("매출총이익")); sg=to_uk(d.get("판관비"))
-        op=to_uk(d.get("영업이익")); ni=to_uk(d.get("당기순이익"))
-        eb=to_uk(d.get("EBITDA")); ast=to_uk(d.get("자산총계"))
-        cs=to_uk(d.get("현금성자산")); lb=to_uk(d.get("부채총계"))
-        db=to_uk(d.get("총차입금")); eq=to_uk(d.get("자본총계"))
-        pr=to_uk(year_data[years[i-1]].get("매출액")) if i>0 else None
-        table["매출액"][year]=fmt_uk(rv)
+        # raw 원 단위 값
+        rv_r=d.get("매출액"); cg_r=d.get("매출원가"); gp_r=d.get("매출총이익")
+        sg_r=d.get("판관비"); op_r=d.get("영업이익"); ni_r=d.get("당기순이익")
+        eb_r=d.get("EBITDA"); ast_r=d.get("자산총계"); cs_r=d.get("현금성자산")
+        lb_r=d.get("부채총계"); db_r=d.get("총차입금"); eq_r=d.get("자본총계")
+        # display 단위 값
+        rv=to_d(rv_r); cg=to_d(cg_r); gp=to_d(gp_r); sg=to_d(sg_r)
+        op=to_d(op_r); ni=to_d(ni_r); eb=to_d(eb_r); ast=to_d(ast_r)
+        cs=to_d(cs_r); lb=to_d(lb_r); db=to_d(db_r); eq=to_d(eq_r)
+        pr_r = year_data[years[i-1]].get("매출액") if i>0 else None
+        pr = to_d(pr_r)
+        table["매출액"][year]=fv(rv_r)
         table["Growth"][year]=fmt_pct((rv/pr-1)*100) if (rv and pr and pr!=0) else "-"
-        table["매출원가"][year]=fmt_uk(cg); table["매출원가율"][year]=sp(cg,rv)
-        table["매출총이익"][year]=fmt_uk(gp); table["매출총이익률"][year]=sp(gp,rv)
-        table["판관비"][year]=fmt_uk(sg); table["판관비율"][year]=sp(sg,rv)
-        table["EBITDA"][year]=fmt_uk(eb); table["EBITDA Margin"][year]=sp(eb,rv)
-        table["영업이익"][year]=fmt_uk(op); table["영업이익률"][year]=sp(op,rv)
-        table["당기순이익"][year]=fmt_uk(ni); table["순이익률"][year]=sp(ni,rv)
-        table["자산총계"][year]=fmt_uk(ast); table["현금성자산"][year]=fmt_uk(cs)
-        table["부채총계"][year]=fmt_uk(lb); table["총차입금"][year]=fmt_uk(db)
-        table["자본총계"][year]=fmt_uk(eq)
+        table["매출원가"][year]=fv(cg_r); table["매출원가율"][year]=sp(cg,rv)
+        table["매출총이익"][year]=fv(gp_r); table["매출총이익률"][year]=sp(gp,rv)
+        table["판관비"][year]=fv(sg_r); table["판관비율"][year]=sp(sg,rv)
+        table["EBITDA"][year]=fv(eb_r); table["EBITDA Margin"][year]=sp(eb,rv)
+        table["영업이익"][year]=fv(op_r); table["영업이익률"][year]=sp(op,rv)
+        table["당기순이익"][year]=fv(ni_r); table["순이익률"][year]=sp(ni,rv)
+        table["자산총계"][year]=fv(ast_r); table["현금성자산"][year]=fv(cs_r)
+        table["부채총계"][year]=fv(lb_r); table["총차입금"][year]=fv(db_r)
+        table["자본총계"][year]=fv(eq_r)
     return pd.DataFrame([{"계정":r,**{y:table[r].get(y,"-") for y in years}} for r in ROW_ORDER])
 
 
@@ -621,40 +660,67 @@ if search_btn and q:
         else:
             st.error("오류: " + err)
 
-# ── 기업 선택: st.dataframe 단독 (행 클릭 선택) ──────────────────────────────
+# ── 기업 선택 — 버튼 방식 (체크박스 없음) ──────────────────────────────────
 if "search_rows" in st.session_state:
-    rows = st.session_state["search_rows"]
-    display_df = pd.DataFrame([
-        {"기업명": r["기업명"], "대표자": r["대표자"],
-         "업종": r["업종"], "상장구분": r["상장구분"]}
-        for r in rows
-    ])
-    st.caption(f"🔍 {len(rows)}개 기업 — 행을 클릭하면 선택됩니다")
+    rows    = st.session_state["search_rows"]
+    sel_idx = st.session_state.get("sel_idx", -1)
+    if sel_idx is None: sel_idx = -1
 
-    sel = st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        selection_mode="single-row",
-        on_select="rerun",
-        key="corp_df_sel",
-        column_config={
-            "기업명":   st.column_config.TextColumn(width="medium"),
-            "대표자":   st.column_config.TextColumn(width="small"),
-            "업종":     st.column_config.TextColumn(width="large"),
-            "상장구분": st.column_config.TextColumn(width="small"),
-        },
-    )
-    selected_rows = sel.selection.rows
-    if selected_rows:
-        idx    = selected_rows[0]
-        chosen = rows[idx]
-        prev   = st.session_state.get("chosen_corp", {})
-        if prev.get("_corp_code") != chosen["_corp_code"]:
-            st.session_state["chosen_corp"] = chosen
+    # 헤더
+    h1,h2,h3,h4 = st.columns([2.5,1.5,3.5,1.2])
+    for hcol, htxt in zip([h1,h2,h3,h4],["기업명","대표자","업종","상장구분"]):
+        hcol.markdown(
+            f"<div style='background:#2c3e50;color:#fff;padding:7px 12px;"
+            f"font-weight:600;font-size:0.84rem;text-align:center'>{htxt}</div>",
+            unsafe_allow_html=True)
+
+    # CSS: 버튼을 표 행처럼 스타일 + hover/selected
+    st.markdown("""
+<style>
+.corp-btn > button {
+    background:#f5f6fa !important; color:#212529 !important;
+    border:none !important; border-bottom:1px solid #dfe6e9 !important;
+    border-radius:0 !important; text-align:left !important;
+    padding:6px 10px !important; font-size:0.83rem !important;
+    height:34px !important; min-height:34px !important; width:100% !important;
+}
+.corp-btn > button:hover { background:#e74c3c !important; color:#fff !important; }
+.corp-sel  > button,
+.corp-sel  > button:hover {
+    background:#e74c3c !important; color:#fff !important; font-weight:700 !important;
+    border:none !important; border-bottom:1px solid #c0392b !important;
+    border-radius:0 !important; text-align:left !important;
+    padding:6px 10px !important; font-size:0.83rem !important;
+    height:34px !important; min-height:34px !important; width:100% !important;
+}
+</style>""", unsafe_allow_html=True)
+
+    for i, row in enumerate(rows):
+        is_sel = (i == sel_idx)
+        div_cls = "corp-sel" if is_sel else "corp-btn"
+        r1,r2,r3,r4 = st.columns([2.5,1.5,3.5,1.2])
+        clicked = False
+        for rcol, val, k in [
+            (r1, row["기업명"],   f"cn{i}"),
+            (r2, row["대표자"],   f"cr{i}"),
+            (r3, row["업종"],     f"ci{i}"),
+            (r4, row["상장구분"], f"cs{i}"),
+        ]:
+            with rcol:
+                st.markdown(f'<div class="{div_cls}">', unsafe_allow_html=True)
+                if st.button(val, key=k, use_container_width=True):
+                    clicked = True
+                st.markdown('</div>', unsafe_allow_html=True)
+        if clicked:
+            st.session_state["sel_idx"]     = i
+            st.session_state["chosen_corp"] = row
             st.session_state["step2_ready"] = True
             st.session_state.pop("result", None)
-        st.success(f"✅ 선택됨: **{chosen['기업명']}** | {chosen['대표자']} | {chosen['상장구분']}")
+            st.rerun()
+
+    if 0 <= sel_idx < len(rows):
+        ch = rows[sel_idx]
+        st.success(f"✅ 선택됨: **{ch['기업명']}** | {ch['대표자']} | {ch['상장구분']}")
 
 st.divider()
 
@@ -666,44 +732,78 @@ if st.session_state.get("step2_ready"):
 
     st.markdown(f"#### STEP 2 · 조회 설정  —  **{corp_name}**")
 
-    all_years  = [str(y) for y in range(CURRENT_YEAR, 2009, -1)]
-    latest_yr  = CURRENT_YEAR - 1
+    all_years = [str(y) for y in range(CURRENT_YEAR, 2009, -1)]
+    latest_yr = CURRENT_YEAR - 1
 
-    # 기간 선택 버튼으로 시작연도 preset
-    if "yr_from" not in st.session_state: st.session_state["yr_from"] = str(latest_yr - 4)
-    if "yr_to"   not in st.session_state: st.session_state["yr_to"]   = str(latest_yr)
+    # 기본값 초기화 (selectbox key와 동일한 key 사용)
+    if "sel_yr_from" not in st.session_state: st.session_state["sel_yr_from"] = str(latest_yr - 4)
+    if "sel_yr_to"   not in st.session_state: st.session_state["sel_yr_to"]   = str(latest_yr)
+    if "active_period" not in st.session_state: st.session_state["active_period"] = "5년"
+    if "display_unit" not in st.session_state:  st.session_state["display_unit"]  = int(1e8)  # 억원
+    if "display_unit_label" not in st.session_state: st.session_state["display_unit_label"] = "억원"
 
-    col_fs, col_period, col_yr1, col_yr2 = st.columns([3, 1.5, 1, 1])
+    col_fs, col_period, col_unit, col_yr1, col_yr2 = st.columns([2.5, 1.5, 1.8, 1, 1])
+
     with col_fs:
         fs_pref = st.radio("재무제표 구분", ["연결 우선","별도 우선"], index=0, horizontal=True)
         fs_preference = "CFS" if fs_pref == "연결 우선" else "OFS"
+
     with col_period:
-        st.markdown("<div style='font-size:0.82rem;color:#555;margin-bottom:4px'>기간 선택</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:0.82rem;color:#555;margin-bottom:4px;'>기간 선택</div>", unsafe_allow_html=True)
         pb1, pb2, pb3 = st.columns(3)
+        def _period_style(label):
+            return ("background:#e74c3c;color:#fff;border-radius:4px;padding:3px 6px;font-size:0.78rem;font-weight:700;text-align:center"
+                    if st.session_state.get("active_period") == label
+                    else "background:#f0f2f6;color:#333;border-radius:4px;padding:3px 6px;font-size:0.78rem;text-align:center")
         if pb1.button("5년",  use_container_width=True, key="p5"):
-            st.session_state["yr_from"] = str(latest_yr - 4)
-            st.session_state["yr_to"]   = str(latest_yr)
+            st.session_state["sel_yr_from"]    = str(latest_yr - 4)
+            st.session_state["sel_yr_to"]      = str(latest_yr)
+            st.session_state["active_period"]  = "5년"
             st.rerun()
         if pb2.button("10년", use_container_width=True, key="p10"):
-            st.session_state["yr_from"] = str(latest_yr - 9)
-            st.session_state["yr_to"]   = str(latest_yr)
+            st.session_state["sel_yr_from"]    = str(latest_yr - 9)
+            st.session_state["sel_yr_to"]      = str(latest_yr)
+            st.session_state["active_period"]  = "10년"
             st.rerun()
         if pb3.button("20년", use_container_width=True, key="p20"):
-            st.session_state["yr_from"] = str(max(2010, latest_yr - 19))
-            st.session_state["yr_to"]   = str(latest_yr)
+            st.session_state["sel_yr_from"]    = str(max(2010, latest_yr - 19))
+            st.session_state["sel_yr_to"]      = str(latest_yr)
+            st.session_state["active_period"]  = "20년"
             st.rerun()
+        # 활성 버튼 표시
+        ap = st.session_state.get("active_period","5년")
+        st.markdown(f"<div style='font-size:0.75rem;color:#e74c3c;text-align:center'>선택: {ap}</div>", unsafe_allow_html=True)
+
+    with col_unit:
+        st.markdown("<div style='font-size:0.82rem;color:#555;margin-bottom:4px;'>단위 선택</div>", unsafe_allow_html=True)
+        u1, u2 = st.columns(2)
+        u3, u4 = st.columns(2)
+        UNIT_MAP = {"천원": int(1e3), "백만원": int(1e6), "억원": int(1e8), "십억원": int(1e9)}
+        def _unit_btn(col, label, key):
+            active = st.session_state.get("display_unit_label") == label
+            if col.button(label, use_container_width=True, key=key,
+                          type="primary" if active else "secondary"):
+                st.session_state["display_unit"]       = UNIT_MAP[label]
+                st.session_state["display_unit_label"] = label
+                st.rerun()
+        _unit_btn(u1, "천원",  "u_chun")
+        _unit_btn(u2, "백만원","u_baek")
+        _unit_btn(u3, "억원",  "u_uk")
+        _unit_btn(u4, "십억원","u_10uk")
+        ul = st.session_state.get("display_unit_label","억원")
+        st.markdown(f"<div style='font-size:0.75rem;color:#e74c3c;text-align:center'>선택: {ul}</div>", unsafe_allow_html=True)
+
     with col_yr1:
-        yr_from_default = st.session_state["yr_from"]
-        year_from = st.selectbox("시작 연도", all_years,
-            index=all_years.index(yr_from_default) if yr_from_default in all_years else len(all_years)-1,
-            key="sel_yr_from")
-        st.session_state["yr_from"] = year_from
+        yfrom_idx = (all_years.index(st.session_state["sel_yr_from"])
+                     if st.session_state["sel_yr_from"] in all_years else len(all_years)-1)
+        year_from = st.selectbox("시작 연도", all_years, index=yfrom_idx, key="sb_from")
+        st.session_state["sel_yr_from"] = year_from   # 수동 선택도 저장
+
     with col_yr2:
-        yr_to_default = st.session_state["yr_to"]
-        year_to = st.selectbox("종료 연도", all_years,
-            index=all_years.index(yr_to_default) if yr_to_default in all_years else 0,
-            key="sel_yr_to")
-        st.session_state["yr_to"] = year_to
+        yto_idx = (all_years.index(st.session_state["sel_yr_to"])
+                   if st.session_state["sel_yr_to"] in all_years else 0)
+        year_to = st.selectbox("종료 연도", all_years, index=yto_idx, key="sb_to")
+        st.session_state["sel_yr_to"] = year_to       # 수동 선택도 저장
 
     if int(year_from) > int(year_to):
         st.warning("⚠️ 시작 연도가 종료 연도보다 큽니다."); st.stop()
@@ -806,14 +906,19 @@ if "result" in st.session_state:
                                  +[{"항목":"합계","금액(억원)":fmt_uk(to_uk(sum(v for _,v in dp)))}]),
                     use_container_width=False, hide_index=True)
 
-    st.markdown("##### 최종 요약 재무제표 (단위: 억원)")
-    summary_df = build_table(year_data)
-    # 첫 컬럼(계정) 좌측, 연도 컬럼 우측 정렬
-    col_cfg = {"계정": st.column_config.TextColumn("계정", width="medium")}
-    for yr_col in [c for c in summary_df.columns if c != "계정"]:
-        col_cfg[yr_col] = st.column_config.TextColumn(yr_col, width="small")
-    st.dataframe(summary_df, use_container_width=True, hide_index=True,
-                 height=700, column_config=col_cfg)
+    du    = st.session_state.get("display_unit", int(1e8))
+    du_lb = st.session_state.get("display_unit_label", "억원")
+    st.markdown(f"##### 최종 요약 재무제표 (단위: {du_lb})")
+    summary_df = build_table(year_data, display_unit=du)
+    yr_cols = [col for col in summary_df.columns if col != "계정"]
+    styled = (summary_df.style
+              .set_properties(subset=["계정"],   **{"text-align":"left"})
+              .set_properties(subset=yr_cols,    **{"text-align":"right"})
+              .set_table_styles([
+                  {"selector":"th", "props":[("text-align","center")]},
+                  {"selector":"th:first-child","props":[("text-align","left")]},
+              ]))
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=700)
 
     with st.expander("교차 검증", expanded=False):
         vrows = [{"연도":y,"재무제표 종류":year_fstype.get(y,"-"),
