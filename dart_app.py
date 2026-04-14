@@ -317,7 +317,13 @@ def fetch_dart_document(rcept_no, dcm_no):
 
 @st.cache_data(ttl=3600)
 def try_document_zip(rcept_no):
-    """document.xml ZIP 시도 (XBRL 기업용, 비상장은 실패할 수 있음)"""
+    """
+    document.xml ZIP 시도.
+    반환: (html_combined, pdf_bytes_list)
+      - html_combined : str or None
+      - pdf_bytes_list: list of bytes (각 PDF 파일 내용)
+    ZipFile 객체는 캐시 불가이므로 내부에서 모두 추출 후 반환.
+    """
     try:
         r = requests_get_with_retry(
             "https://opendart.fss.or.kr/api/document.xml",
@@ -326,15 +332,26 @@ def try_document_zip(rcept_no):
         z = zipfile.ZipFile(io.BytesIO(r.content))
         html_files = [f for f in z.namelist() if f.lower().endswith((".html",".htm"))]
         pdf_files  = [f for f in z.namelist() if f.lower().endswith(".pdf")]
-        combined   = ""
+
+        # HTML 텍스트 추출
+        combined = ""
         for fname in html_files[:15]:
             for enc in ["utf-8","cp949","euc-kr"]:
                 try:
                     combined += z.read(fname).decode(enc, errors="ignore") + "\n"
                     break
                 except: continue
-        return combined or None, pdf_files, z
-    except: return None, [], None
+
+        # PDF bytes 추출 (ZipFile 객체 대신 bytes 리스트로 반환)
+        pdf_bytes_list = []
+        for fname in sorted(pdf_files)[:3]:
+            try:
+                pdf_bytes_list.append(z.read(fname))
+            except: continue
+
+        return combined or None, pdf_bytes_list
+    except:
+        return None, []
 
 
 def parse_html_tables(html_text, log=None):
@@ -424,7 +441,7 @@ def analyze_from_document(corp_code, year):
     raw = {}
 
     # ── 방법1: document.xml ZIP ───────────────────────────────────────────────
-    html_combined, pdf_files, zf = try_document_zip(rcept_no)
+    html_combined, pdf_bytes_list = try_document_zip(rcept_no)
     if html_combined:
         log.append(f"방법1-HTML: {len(html_combined):,} bytes")
         raw = parse_html_tables(html_combined, log)
@@ -454,13 +471,12 @@ def analyze_from_document(corp_code, year):
                     raw = candidate
 
     # ── 방법3: ZIP 내 PDF 파싱 ────────────────────────────────────────────────
-    if "매출액" not in raw and zf and pdf_files:
-        log.append(f"방법3: PDF 파싱 ({len(pdf_files)}개)")
+    if "매출액" not in raw and pdf_bytes_list:
+        log.append(f"방법3: PDF 파싱 ({len(pdf_bytes_list)}개)")
         try:
             import pdfplumber
-            for fname in sorted(pdf_files)[:3]:
+            for pdf_bytes in pdf_bytes_list:
                 try:
-                    pdf_bytes = zf.read(fname)
                     results_pdf = {}
                     full_txt    = ""
                     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -629,6 +645,12 @@ if "search_rows" in st.session_state:
     # CSS로 radio 버튼 자체를 숨기고, label 전체를 클릭 영역으로
     st.markdown("""
 <style>
+/* 검색 입력창 라벨이 밝은 배경에서 안 보이는 문제 방지 */
+label[data-testid="stTextInputLabel"],
+div[data-testid="stTextInput"] label {
+    color: #1a1a2e !important;
+    font-weight: 600 !important;
+}
 div[data-testid="stRadio"] > label { display:none; }
 div[data-testid="stRadio"] > div { gap:0 !important; }
 div[data-testid="stRadio"] > div > label {
@@ -638,7 +660,7 @@ div[data-testid="stRadio"] > div > label {
     cursor:pointer; transition:background 0.15s;
     font-size:0.9rem; width:100%;
 }
-div[data-testid="stRadio"] > div > label:hover { background:#e8f0fe !important; }
+div[data-testid="stRadio"] > div > label:hover { background:#ffe0e0 !important; color:#c0392b !important; font-weight:600; }
 div[data-testid="stRadio"] > div > label:has(input:checked) {
     background:#c8d9fc !important; font-weight:600;
 }
