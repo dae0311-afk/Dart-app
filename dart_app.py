@@ -10,12 +10,11 @@ from datetime import datetime
 
 st.set_page_config(page_title="DART 재무 분석", page_icon="📈", layout="wide")
 
+# ── 요청 헤더 / 재시도 래퍼 ──────────────────────────────────────────────────
 _HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0.0.0 Safari/537.36"),
     "Accept-Language": "ko-KR,ko;q=0.9",
     "Referer": "https://opendart.fss.or.kr/",
 }
@@ -37,16 +36,15 @@ def requests_get_with_retry(url, params=None, timeout=60, max_retries=4):
             raise e
     raise last_exc
 
-# ── 업종명 매핑 (KSIC 앞 2자리 기준) ─────────────────────────────────────────
+# ── 업종명 매핑 (KSIC 앞 2자리) ──────────────────────────────────────────────
 _INDUTY_MAP = {
     "01":"농업","02":"임업","03":"어업",
     "05":"석탄·원유·천연가스 광업","06":"금속 광업","07":"비금속광물 광업",
-    "08":"기타 광업","09":"광업 지원 서비스업",
     "10":"식료품 제조업","11":"음료 제조업","12":"담배 제조업",
-    "13":"섬유제품 제조업","14":"의복·의복액세서리·모피 제조업",
+    "13":"섬유제품 제조업","14":"의복·모피 제조업",
     "15":"가죽·가방·신발 제조업","16":"목재·나무제품 제조업",
-    "17":"펄프·종이·종이제품 제조업","18":"인쇄·기록매체 복제업",
-    "19":"코크스·연탄·석유정제품 제조업",
+    "17":"펄프·종이제품 제조업","18":"인쇄·기록매체 복제업",
+    "19":"코크스·석유정제품 제조업",
     "20":"화학물질·화학제품 제조업","21":"의약품 제조업",
     "22":"고무·플라스틱제품 제조업","23":"비금속 광물제품 제조업",
     "24":"1차 금속 제조업","25":"금속가공제품 제조업",
@@ -54,9 +52,8 @@ _INDUTY_MAP = {
     "27":"의료·정밀·광학기기 제조업","28":"전기장비 제조업",
     "29":"기타 기계·장비 제조업","30":"자동차·트레일러 제조업",
     "31":"기타 운송장비 제조업","32":"가구 제조업","33":"기타 제품 제조업",
-    "35":"전기·가스·증기·공기조절 공급업","36":"수도업",
+    "35":"전기·가스·증기 공급업","36":"수도업",
     "37":"하수·폐수·분뇨 처리업","38":"폐기물 처리·원료재생업",
-    "39":"환경 정화·복원업",
     "41":"종합 건설업","42":"전문직별 공사업",
     "45":"자동차·부품 판매업","46":"도매·상품중개업","47":"소매업",
     "49":"육상 운송업","50":"수상 운송업","51":"항공 운송업",
@@ -64,29 +61,21 @@ _INDUTY_MAP = {
     "55":"숙박업","56":"음식점·주점업",
     "58":"출판업","59":"영상·오디오 제작·배급업",
     "60":"방송업","61":"통신업",
-    "62":"컴퓨터 프로그래밍·시스템 통합 및 관리업",
-    "63":"정보서비스업",
+    "62":"컴퓨터 프로그래밍·시스템 통합업","63":"정보서비스업",
     "64":"금융업","65":"보험·연금업","66":"금융·보험관련 서비스업",
     "68":"부동산업",
     "70":"연구개발업","71":"전문 서비스업",
     "72":"건축기술·엔지니어링 서비스업",
-    "73":"기타 과학기술 서비스업",
-    "74":"사업시설 관리·조경 서비스업",
-    "75":"사업 지원 서비스업",
-    "84":"공공행정·국방·사회보장 행정",
-    "85":"교육 서비스업","86":"보건업","87":"사회복지 서비스업",
-    "90":"창작·예술·여가관련 서비스업",
-    "91":"스포츠·오락관련 서비스업",
-    "94":"협회 및 단체","95":"개인·가정용품 수리업",
-    "96":"기타 개인 서비스업",
+    "74":"사업시설 관리·조경 서비스업","75":"사업 지원 서비스업",
+    "84":"공공행정·국방","85":"교육 서비스업",
+    "86":"보건업","87":"사회복지 서비스업",
+    "90":"창작·예술·여가관련 서비스업","91":"스포츠·오락관련 서비스업",
+    "94":"협회 및 단체","96":"기타 개인 서비스업",
 }
 
 def get_industry_name(induty_code):
     code = str(induty_code).strip()
-    if not code or code == "-":
-        return "-"
-    prefix = code[:2]
-    return _INDUTY_MAP.get(prefix, code)
+    return _INDUTY_MAP.get(code[:2], code) if code and code != "-" else "-"
 
 CORP_CLS_MAP = {"Y":"유가증권","K":"코스닥","N":"코넥스","E":"기타(비상장)"}
 
@@ -95,18 +84,17 @@ def check_password():
     if st.session_state.get("authenticated"):
         return True
     st.title("DART 재무 분석")
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
         st.subheader("🔒 Login")
         with st.form("login_form"):
             pw = st.text_input("Password", type="password", placeholder="비밀번호 입력 후 Enter")
-            submitted = st.form_submit_button("Login", use_container_width=True, type="primary")
-        if submitted:
-            if pw == st.secrets["APP_PASSWORD"]:
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("비밀번호가 틀렸습니다.")
+            if st.form_submit_button("Login", use_container_width=True, type="primary"):
+                if pw == st.secrets["APP_PASSWORD"]:
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("비밀번호가 틀렸습니다.")
     return False
 
 if not check_password():
@@ -117,12 +105,12 @@ CURRENT_YEAR = datetime.now().year
 
 # ── 계정 ID 매핑 ──────────────────────────────────────────────────────────────
 IS_IDS = {
-    "매출액":     ["ifrs-full_Revenue", "dart_Revenue"],
-    "매출원가":   ["ifrs-full_CostOfSales", "dart_CostOfSales"],
+    "매출액":     ["ifrs-full_Revenue","dart_Revenue"],
+    "매출원가":   ["ifrs-full_CostOfSales","dart_CostOfSales"],
     "매출총이익": ["ifrs-full_GrossProfit"],
     "판관비":     ["ifrs-full_SellingGeneralAndAdministrativeExpense",
                    "dart_TotalSellingGeneralAdministrativeExpenses"],
-    "영업이익":   ["dart_OperatingIncomeLoss", "ifrs-full_OperatingIncome",
+    "영업이익":   ["dart_OperatingIncomeLoss","ifrs-full_OperatingIncome",
                    "ifrs-full_ProfitLossFromOperatingActivities"],
     "당기순이익": ["ifrs-full_ProfitLoss",
                    "ifrs-full_ProfitLossAttributableToOwnersOfParent"],
@@ -130,45 +118,74 @@ IS_IDS = {
 BS_IDS = {
     "자산총계":         ["ifrs-full_Assets"],
     "현금및현금성자산": ["ifrs-full_CashAndCashEquivalents"],
-    "단기금융상품":     ["ifrs-full_ShorttermInvestments", "dart_ShortTermFinancialInstruments"],
+    "단기금융상품":     ["ifrs-full_ShorttermInvestments","dart_ShortTermFinancialInstruments"],
     "부채총계":         ["ifrs-full_Liabilities"],
     "자본총계":         ["ifrs-full_Equity"],
-    "단기차입금":       ["ifrs-full_ShorttermBorrowings", "dart_ShortTermBorrowings"],
+    "단기차입금":       ["ifrs-full_ShorttermBorrowings","dart_ShortTermBorrowings"],
     "유동성장기차입금": ["ifrs-full_CurrentPortionOfLongtermBorrowings",
                          "dart_CurrentPortionOfLongTermBorrowings"],
     "유동성사채":       ["dart_CurrentPortionOfBondsIssued"],
     "단기리스부채":     ["ifrs-full_CurrentLeaseLiabilities"],
-    "장기차입금":       ["ifrs-full_LongtermBorrowings", "dart_LongTermBorrowings"],
+    "장기차입금":       ["ifrs-full_LongtermBorrowings","dart_LongTermBorrowings"],
     "사채":             ["dart_BondsIssued"],
     "장기리스부채":     ["ifrs-full_NoncurrentLeaseLiabilities"],
 }
 CF_IDS = {
-    "감가상각비":     ["ifrs-full_AdjustmentsForDepreciationExpense", "dart_DepreciationExpenses"],
-    "무형자산상각비": ["ifrs-full_AdjustmentsForAmortisationExpense", "dart_AmortisationExpenses"],
+    "감가상각비":     ["ifrs-full_AdjustmentsForDepreciationExpense","dart_DepreciationExpenses"],
+    "무형자산상각비": ["ifrs-full_AdjustmentsForAmortisationExpense","dart_AmortisationExpenses"],
 }
 
 # ── 유틸 ──────────────────────────────────────────────────────────────────────
 def parse_amount(val):
     try:
-        s = str(val).replace(",", "").replace(" ", "")
+        s = str(val).replace(",","").replace(" ","")
         if s.startswith("(") and s.endswith(")"):
             s = "-" + s[1:-1]
         return int(s)
-    except Exception:
+    except:
         return None
 
 def to_uk(val):
     return None if val is None else val / 100_000_000
 
 def fmt_uk(val):
-    if val is None:
-        return "-"
+    if val is None: return "-"
     return "{:.2f}".format(val) if abs(val) < 1 else "{:,.0f}".format(val)
 
 def fmt_pct(val):
     return "-" if val is None else "{:.1f}%".format(val)
 
-# ── DART API ──────────────────────────────────────────────────────────────────
+# ── 파생 지표 계산 (XBRL·문서 공통 사용) ─────────────────────────────────────
+def compute_derived(raw):
+    op, dep, amd = raw.get("영업이익"), raw.get("감가상각비"), raw.get("무형자산상각비")
+    ebitda, ebitda_calc = None, ""
+    if op is not None:
+        parts = [("영업이익", op)]
+        if dep: parts.append(("감가상각비", dep))
+        if amd: parts.append(("무형자산상각비", amd))
+        ebitda = sum(v for _, v in parts)
+        ebitda_calc = (" + ".join([f"{k}({to_uk(v):,.0f}억)" for k,v in parts])
+                       + f" = {to_uk(ebitda):,.0f}억")
+
+    cash, stfi = raw.get("현금및현금성자산"), raw.get("단기금융상품")
+    c_parts = [(k,v) for k,v in [("현금및현금성자산",cash),("단기금융상품",stfi)] if v]
+    cash_total = sum(v for _,v in c_parts) if c_parts else None
+    cash_calc  = ((" + ".join([f"{k}({to_uk(v):,.0f}억)" for k,v in c_parts])
+                   + f" = {to_uk(cash_total):,.0f}억") if c_parts else "")
+
+    debt_keys = ["단기차입금","유동성장기차입금","유동성사채","단기리스부채",
+                 "장기차입금","사채","장기리스부채"]
+    debt_parts = [(k,raw[k]) for k in debt_keys if raw.get(k)]
+    total_debt = sum(v for _,v in debt_parts) if debt_parts else None
+    debt_calc  = ((" + ".join([f"{k}({to_uk(v):,.0f}억)" for k,v in debt_parts])
+                   + f" = {to_uk(total_debt):,.0f}억") if debt_parts else "")
+
+    raw.update({"EBITDA": ebitda, "현금성자산": cash_total, "총차입금": total_debt,
+                "_ebitda_calc": ebitda_calc, "_cash_calc": cash_calc,
+                "_debt_calc": debt_calc, "_debt_parts": debt_parts})
+    return raw
+
+# ── DART XBRL API ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400)
 def get_corp_list():
     import os
@@ -181,11 +198,10 @@ def get_corp_list():
     r = requests_get_with_retry(url, timeout=120, max_retries=4)
     z = zipfile.ZipFile(io.BytesIO(r.content))
     root = ET.fromstring(z.read("CORPCODE.xml"))
-    return pd.DataFrame([{
-        "corp_code":  item.findtext("corp_code", ""),
-        "corp_name":  item.findtext("corp_name", ""),
-        "stock_code": item.findtext("stock_code", "").strip(),
-    } for item in root.findall("list")])
+    return pd.DataFrame([{"corp_code": item.findtext("corp_code",""),
+                           "corp_name": item.findtext("corp_name",""),
+                           "stock_code": item.findtext("stock_code","").strip()}
+                          for item in root.findall("list")])
 
 def search_corp(name, df):
     return df[df["corp_name"].str.contains(name, na=False)].reset_index(drop=True)
@@ -193,11 +209,11 @@ def search_corp(name, df):
 @st.cache_data(ttl=3600)
 def get_corp_info(corp_code):
     try:
-        r = requests_get_with_retry(
-            "https://opendart.fss.or.kr/api/company.json",
-            params={"crtfc_key": API_KEY, "corp_code": corp_code}, timeout=30)
+        r = requests_get_with_retry("https://opendart.fss.or.kr/api/company.json",
+                                    params={"crtfc_key": API_KEY, "corp_code": corp_code},
+                                    timeout=30)
         return r.json()
-    except Exception:
+    except:
         return {}
 
 @st.cache_data(ttl=3600)
@@ -210,92 +226,204 @@ def get_fs(corp_code, year, report_code, fs_div):
             timeout=60)
         data = r.json()
         if data.get("status") != "000":
-            return None, data.get("message", "fail")
+            return None, data.get("message","fail")
         return pd.DataFrame(data["list"]), None
     except Exception as e:
         return None, str(e)
 
 def find_val(df, ids, col="thstrm_amount"):
-    if df is None or df.empty:
-        return None
+    if df is None or df.empty: return None
     for aid in ids:
         rows = df[df["account_id"] == aid]
         if not rows.empty:
             v = parse_amount(rows.iloc[0][col])
-            if v is not None:
-                return v
+            if v is not None: return v
     return None
 
 def find_by_name(df, kw, col="thstrm_amount"):
-    if df is None or df.empty:
-        return None
+    if df is None or df.empty: return None
     rows = df[df["account_nm"].str.contains(kw, na=False)]
     return parse_amount(rows.iloc[0][col]) if not rows.empty else None
 
+# ── DART 공시 문서 파싱 (비상장 기업 XBRL 없을 때 사용) ───────────────────────
+@st.cache_data(ttl=1800)
+def find_filing_rcept_no(corp_code, year):
+    """해당 연도 사업/감사보고서 접수번호 조회"""
+    bgn = f"{year}0101"
+    end = f"{int(year)+1}0630"   # 다음해 상반기까지 (지연 제출 대응)
+
+    for pblntf_ty in ["A", "F", ""]:   # 정기공시 → 외부감사관련 → 전체
+        try:
+            r = requests_get_with_retry(
+                "https://opendart.fss.or.kr/api/list.json",
+                params={"crtfc_key": API_KEY, "corp_code": corp_code,
+                        "bgn_de": bgn, "end_de": end,
+                        "pblntf_ty": pblntf_ty, "page_count": 20},
+                timeout=30)
+            data = r.json()
+            if data.get("status") != "000" or not data.get("list"):
+                continue
+            items = data["list"]
+            # 사업보고서 / 감사보고서 우선
+            for kw in ["사업보고서", "감사보고서", "연결감사"]:
+                for item in items:
+                    if kw in item.get("report_nm",""):
+                        return item["rcept_no"]
+            return items[0]["rcept_no"]
+        except:
+            continue
+    return None
+
+
+@st.cache_data(ttl=3600)
+def get_document_html(rcept_no):
+    """DART 공시 문서 ZIP 다운로드 → HTML 텍스트 반환"""
+    try:
+        r = requests_get_with_retry(
+            "https://opendart.fss.or.kr/api/document.xml",
+            params={"crtfc_key": API_KEY, "rcept_no": rcept_no},
+            timeout=90)
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        html_files = sorted([f for f in z.namelist()
+                              if f.lower().endswith(('.html','.htm'))])
+        combined = ""
+        for fname in html_files[:10]:
+            for enc in ['utf-8','cp949','euc-kr']:
+                try:
+                    combined += z.read(fname).decode(enc, errors='ignore') + "\n"
+                    break
+                except:
+                    continue
+        return combined or None
+    except:
+        return None
+
+
+def _detect_unit(text):
+    """재무제표 숫자 단위 감지 → 원 단위 환산 승수 반환"""
+    t = text.replace(" ","")
+    if "단위:억원" in t:   return 100_000_000
+    if "단위:백만원" in t: return 1_000_000
+    if "단위:천원" in t:   return 1_000
+    return 1
+
+
+def _extract_num(s):
+    """셀 텍스트 → 정수 변환 (괄호 음수 처리)"""
+    s = str(s).strip().replace(',','').replace(' ','').replace('\xa0','')
+    if not s or s in ('-','–','—'): return None
+    if s.startswith('(') and s.endswith(')'): s = '-' + s[1:-1]
+    try:    return int(float(s))
+    except: return None
+
+
+def parse_html_financials(html_content):
+    """
+    DART HTML 문서에서 핵심 재무 수치 추출.
+    모든 <table>을 순회하며 계정명 키워드로 매칭.
+    반환값: {계정명: 원 단위 금액}
+    """
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_content, 'lxml')
+    except Exception:
+        return {}
+
+    unit = _detect_unit(soup.get_text())
+
+    # 계정명 키워드 (다양한 표현 커버)
+    KWDS = {
+        "매출액":           ["매출액","수익(매출액)","영업수익","매출"],
+        "매출원가":         ["매출원가"],
+        "매출총이익":       ["매출총이익"],
+        "판관비":           ["판매비와관리비","판매비및관리비","판관비"],
+        "영업이익":         ["영업이익","영업손익"],
+        "당기순이익":       ["당기순이익","당기순손익"],
+        "자산총계":         ["자산총계"],
+        "현금및현금성자산": ["현금및현금성자산","현금과예금"],
+        "단기금융상품":     ["단기금융상품"],
+        "부채총계":         ["부채총계"],
+        "자본총계":         ["자본총계"],
+        "단기차입금":       ["단기차입금"],
+        "유동성장기차입금": ["유동성장기차입금","유동성장기부채"],
+        "장기차입금":       ["장기차입금"],
+        "사채":             ["사채"],
+        "감가상각비":       ["감가상각비"],
+        "무형자산상각비":   ["무형자산상각비"],
+    }
+
+    results = {}
+
+    for table in soup.find_all('table'):
+        for row in table.find_all('tr'):
+            cells = row.find_all(['td','th'])
+            if len(cells) < 2:
+                continue
+            label = cells[0].get_text(strip=True).replace('\xa0','').replace(' ','')
+
+            for key, kwds in KWDS.items():
+                if key in results:
+                    continue
+                if any(label == kw.replace(' ','') or
+                       label.startswith(kw.replace(' ',''))
+                       for kw in kwds):
+                    # 2~4번째 셀에서 첫 번째 유효 숫자 사용
+                    for cell in cells[1:4]:
+                        val = _extract_num(cell.get_text())
+                        if val is not None and val != 0:
+                            results[key] = val * unit
+                            break
+
+    return results
+
+
+def analyze_from_document(corp_code, year):
+    """XBRL 없는 경우: 공시 HTML 문서 파싱으로 재무 수치 추출"""
+    rcept_no = find_filing_rcept_no(corp_code, year)
+    if not rcept_no:
+        return None, None, "공시 없음"
+
+    html = get_document_html(rcept_no)
+    if not html:
+        return None, None, "문서 다운로드 실패"
+
+    raw = parse_html_financials(html)
+    if not raw or "매출액" not in raw:
+        return None, None, "재무데이터 파싱 실패"
+
+    raw = compute_derived(raw)
+    return raw, "별도재무제표(문서파싱)", None
+
+
+# ── 메인 분석 함수 (XBRL → 문서파싱 순서로 시도) ─────────────────────────────
 def analyze(corp_code, year, fs_preference="CFS"):
-    """
-    [비상장 기업 지원]
-    - 비상장 포함 모든 보고서 코드(11011~11014)를 전수 시도
-    - CFS/OFS 우선순위는 사용자 선택 그대로 따름
-    - find_by_name 폴백으로 K-GAAP 계정명도 커버
-    """
     priority = ([("CFS","연결재무제표"),("OFS","별도재무제표")] if fs_preference == "CFS"
                 else [("OFS","별도재무제표"),("CFS","연결재무제표")])
 
-    # 사업보고서(11011) → 반기(11012) → 1분기(11013) → 3분기(11014) 순으로 전수 시도
-    REPORT_CODES = ["11011", "11012", "11013", "11014"]
-
+    # ── 1순위: XBRL 구조화 데이터 ─────────────────────────────────────────────
     df, used_fs_type = None, None
-    for rcode in REPORT_CODES:
+    for rcode in ["11011","11012","11013","11014"]:
         for fs_div, fs_label in priority:
             d, _ = get_fs(corp_code, year, rcode, fs_div)
             if d is not None and not d.empty:
-                suffix = {
-                    "11011": "",
-                    "11012": "(반기)",
-                    "11013": "(1분기)",
-                    "11014": "(3분기)",
-                }.get(rcode, "")
+                suffix = {"11011":"","11012":"(반기)","11013":"(1분기)","11014":"(3분기)"}.get(rcode,"")
                 df, used_fs_type = d, fs_label + suffix
                 break
         if df is not None:
             break
 
-    if df is None:
-        return None, None, "데이터 없음"
+    if df is not None:
+        raw = {}
+        for nm, ids in {**IS_IDS, **BS_IDS, **CF_IDS}.items():
+            raw[nm] = find_val(df, ids) or find_by_name(df, nm)
+        raw = compute_derived(raw)
+        return raw, used_fs_type, None
 
-    raw = {}
-    for nm, ids in {**IS_IDS, **BS_IDS, **CF_IDS}.items():
-        raw[nm] = find_val(df, ids) or find_by_name(df, nm)
+    # ── 2순위: 공시 HTML 문서 파싱 (비상장 기업 대응) ─────────────────────────
+    return analyze_from_document(corp_code, year)
 
-    op, dep, amd = raw.get("영업이익"), raw.get("감가상각비"), raw.get("무형자산상각비")
-    ebitda, ebitda_calc = None, ""
-    if op is not None:
-        parts = [("영업이익", op)]
-        if dep: parts.append(("감가상각비", dep))
-        if amd: parts.append(("무형자산상각비", amd))
-        ebitda = sum(v for _, v in parts)
-        ebitda_calc = (" + ".join(["{0}({1:,.0f}억)".format(k, to_uk(v)) for k,v in parts])
-                       + " = {0:,.0f}억".format(to_uk(ebitda)))
 
-    cash, stfi = raw.get("현금및현금성자산"), raw.get("단기금융상품")
-    c_parts = [(k,v) for k,v in [("현금및현금성자산",cash),("단기금융상품",stfi)] if v]
-    cash_total = sum(v for _,v in c_parts) if c_parts else None
-    cash_calc = ((" + ".join(["{0}({1:,.0f}억)".format(k,to_uk(v)) for k,v in c_parts])
-                  + " = {0:,.0f}억".format(to_uk(cash_total))) if c_parts else "")
-
-    debt_keys = ["단기차입금","유동성장기차입금","유동성사채","단기리스부채",
-                 "장기차입금","사채","장기리스부채"]
-    debt_parts = [(k, raw[k]) for k in debt_keys if raw.get(k)]
-    total_debt = sum(v for _,v in debt_parts) if debt_parts else None
-    debt_calc  = ((" + ".join(["{0}({1:,.0f}억)".format(k,to_uk(v)) for k,v in debt_parts])
-                   + " = {0:,.0f}억".format(to_uk(total_debt))) if debt_parts else "")
-
-    raw.update({"EBITDA": ebitda, "현금성자산": cash_total, "총차입금": total_debt,
-                "_ebitda_calc": ebitda_calc, "_cash_calc": cash_calc,
-                "_debt_calc": debt_calc, "_debt_parts": debt_parts})
-    return raw, used_fs_type, None
-
+# ── 요약 테이블 생성 ──────────────────────────────────────────────────────────
 def build_table(year_data):
     years = sorted(year_data.keys())
     ROW_ORDER = ["매출액","Growth","매출원가","매출원가율",
@@ -303,7 +431,7 @@ def build_table(year_data):
                  "EBITDA","EBITDA Margin","영업이익","영업이익률",
                  "당기순이익","순이익률",
                  "자산총계","현금성자산","부채총계","총차입금","자본총계"]
-    table = {r: {} for r in ROW_ORDER}
+    table = {r:{} for r in ROW_ORDER}
     sp = lambda a,b: fmt_pct(a/b*100) if (a is not None and b and b!=0) else "-"
     for i, year in enumerate(years):
         d  = year_data[year]
@@ -340,9 +468,7 @@ with st.sidebar:
         st.session_state.authenticated = False
         st.rerun()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 1 — 기업 검색 → 전체 테이블 표시 (행 클릭으로 즉시 선택)
-# ══════════════════════════════════════════════════════════════════════════════
+# ── STEP 1: 기업 검색 ─────────────────────────────────────────────────────────
 st.markdown("#### STEP 1 · 기업 검색")
 
 with st.form("search_form"):
@@ -360,89 +486,70 @@ if search_btn and q:
         res = search_corp(q, corp_df).head(50).reset_index(drop=True)
         if res.empty:
             st.warning("해당 기업을 찾을 수 없습니다.")
-            st.session_state.pop("search_display", None)
+            st.session_state.pop("search_rows", None)
         else:
-            with st.spinner("기업 정보 조회 중... ({0}개)".format(len(res))):
+            with st.spinner(f"기업 정보 조회 중... ({len(res)}개)"):
                 rows = []
                 for _, row in res.iterrows():
                     info = get_corp_info(row["corp_code"])
                     ok   = info.get("status") == "000"
                     rows.append({
-                        # 내부 키 (화면 비노출)
                         "_corp_code": row["corp_code"],
-                        # 표시 컬럼
                         "기업명":   row["corp_name"],
-                        "대표자":   info.get("ceo_nm", "-") if ok else "-",
+                        "대표자":   info.get("ceo_nm","-") if ok else "-",
                         "업종":     get_industry_name(info.get("induty_code","")) if ok else "-",
-                        "상장구분": CORP_CLS_MAP.get(info.get("corp_cls",""), "비상장"),
+                        "상장구분": CORP_CLS_MAP.get(info.get("corp_cls",""),"비상장"),
                     })
             st.session_state["search_rows"] = rows
-            # 기업 바뀌면 하위 단계 초기화
-            st.session_state.pop("chosen_corp", None)
-            st.session_state.pop("step2_ready", None)
-            st.session_state.pop("result", None)
+            for k in ("chosen_corp","step2_ready","result"):
+                st.session_state.pop(k, None)
     except Exception as e:
         err = str(e)
-        if any(x in err for x in ["Timeout", "Connect", "timed out"]):
+        if any(x in err for x in ["Timeout","Connect","timed out"]):
             st.error("⏱️ DART 서버 연결 초과. `update_corpcode.py` 실행 후 "
                      "`data/corpcode.csv`를 GitHub에 커밋하세요.")
         else:
             st.error("오류: " + err)
 
-# 검색 결과 테이블 — 행 클릭으로 즉시 선택
+# 결과 테이블 — 행 클릭으로 즉시 선택
 if "search_rows" in st.session_state:
     rows = st.session_state["search_rows"]
-    display_df = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")}
+    display_df = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")}
                                 for r in rows])
+    st.caption(f"🔍 {len(rows)}개 기업 — 행을 클릭하면 바로 선택됩니다")
 
-    st.caption("🔍 {0}개 기업 — 행을 클릭하면 바로 선택됩니다".format(len(rows)))
-
-    event = st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        selection_mode="single-row",
-        on_select="rerun",
-        key="corp_table",
-    )
-
+    event = st.dataframe(display_df, use_container_width=True, hide_index=True,
+                         selection_mode="single-row", on_select="rerun", key="corp_table")
     sel = event.selection.rows
     if sel:
-        idx    = sel[0]
-        chosen = rows[idx]
-        # 행 클릭 즉시 → STEP 2 활성화 (별도 버튼 불필요)
-        prev = st.session_state.get("chosen_corp", {})
+        chosen = rows[sel[0]]
+        prev   = st.session_state.get("chosen_corp", {})
         if prev.get("_corp_code") != chosen["_corp_code"]:
             st.session_state["chosen_corp"] = chosen
             st.session_state["step2_ready"] = True
             st.session_state.pop("result", None)
-        st.success("✅ 선택: **{0}** | {1} | {2}".format(
-            chosen["기업명"], chosen["대표자"], chosen["상장구분"]))
+        st.success(f"✅ 선택: **{chosen['기업명']}** | {chosen['대표자']} | {chosen['상장구분']}")
 
 st.divider()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 2 — 재무제표 구분 + 연도 범위 (비상장도 동일하게 선택 가능)
-# ══════════════════════════════════════════════════════════════════════════════
+# ── STEP 2: 조회 설정 ─────────────────────────────────────────────────────────
 if st.session_state.get("step2_ready"):
     corp      = st.session_state["chosen_corp"]
     corp_code = corp["_corp_code"]
     corp_name = corp["기업명"]
 
-    st.markdown("#### STEP 2 · 조회 설정  —  **{0}**".format(corp_name))
+    st.markdown(f"#### STEP 2 · 조회 설정  —  **{corp_name}**")
 
     all_years    = [str(y) for y in range(CURRENT_YEAR, 2009, -1)]
     default_to   = str(CURRENT_YEAR - 1)
     default_from = str(CURRENT_YEAR - 5)
 
     col_fs, col_yr1, col_yr2 = st.columns([3, 1, 1])
-
     with col_fs:
-        fs_pref = st.radio(
-            "재무제표 구분", options=["연결 우선", "별도 우선"], index=0, horizontal=True,
-            help="연결 없는 연도는 별도로, 별도 없는 연도는 연결로 자동 대체됩니다.")
+        fs_pref = st.radio("재무제표 구분", ["연결 우선","별도 우선"],
+                           index=0, horizontal=True,
+                           help="연결 없는 연도는 별도로 자동 대체됩니다.")
         fs_preference = "CFS" if fs_pref == "연결 우선" else "OFS"
-
     with col_yr1:
         year_from = st.selectbox("시작 연도", all_years,
             index=all_years.index(default_from) if default_from in all_years else len(all_years)-1)
@@ -454,15 +561,13 @@ if st.session_state.get("step2_ready"):
         st.warning("⚠️ 시작 연도가 종료 연도보다 큽니다.")
         st.stop()
 
-    selected_years = [str(y) for y in range(int(year_from), int(year_to) + 1)]
-    st.caption("📅 {0}년 ~ {1}년 ({2}개 연도)".format(year_from, year_to, len(selected_years)))
+    selected_years = [str(y) for y in range(int(year_from), int(year_to)+1)]
+    st.caption(f"📅 {year_from}년 ~ {year_to}년 ({len(selected_years)}개 연도)")
 
-    # 비상장 안내 메시지
-    if corp.get("상장구분") in ("비상장", "기타(비상장)"):
-        st.info("ℹ️ 비상장 기업: DART에 XBRL 재무제표를 제출한 외감법인만 조회됩니다. "
-                "PDF 감사보고서만 제출한 기업은 데이터가 없을 수 있습니다.")
-
-    st.markdown("")
+    # 비상장 안내
+    if corp.get("상장구분") in ("비상장","기타(비상장)"):
+        st.info("ℹ️ 비상장 기업: XBRL 조회 실패 시 공시 HTML 문서를 직접 파싱합니다. "
+                "DART에 아무 공시도 없는 기업은 조회가 불가합니다.")
 
     if st.button("📊 재무제표 출력", type="primary", use_container_width=True):
         year_data, year_fstype = {}, {}
@@ -473,50 +578,49 @@ if st.session_state.get("step2_ready"):
                 year_data[year]   = d
                 year_fstype[year] = fs_used
             else:
-                st.warning("{0}년: 데이터 없음 — DART XBRL 미제출 가능성".format(year))
-            prog.progress((i+1)/len(selected_years), text="{0}년 수집 완료".format(year))
+                st.warning(f"{year}년: 데이터 없음 ({err})")
+            prog.progress((i+1)/len(selected_years), text=f"{year}년 수집 완료")
         prog.empty()
         if year_data:
             fs_set = set(year_fstype.values())
             st.session_state["result"] = {
-                "year_data":   year_data,
-                "year_fstype": year_fstype,
-                "corp_name":   corp_name,
-                "corp_code":   corp_code,
+                "year_data":   year_data, "year_fstype": year_fstype,
+                "corp_name":   corp_name, "corp_code":   corp_code,
                 "mixed_fs":    any("연결" in f for f in fs_set) and any("별도" in f for f in fs_set),
             }
         else:
-            st.error("조회된 데이터가 없습니다. 해당 기업이 DART에 XBRL 재무제표를 제출했는지 확인해주세요.")
+            st.error("조회된 데이터가 없습니다. DART에 공시된 재무제표가 없는 기업입니다.")
 
 st.divider()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 3 — 결과
-# ══════════════════════════════════════════════════════════════════════════════
+# ── STEP 3: 결과 ──────────────────────────────────────────────────────────────
 if "result" in st.session_state:
     r = st.session_state["result"]
-    year_data    = r["year_data"]
-    year_fstype  = r["year_fstype"]
-    sel_name     = r["corp_name"]
-    corp_code_r  = r["corp_code"]
-    mixed_fs     = r["mixed_fs"]
-    years_sorted = sorted(year_data.keys())
+    year_data    = r["year_data"];    year_fstype = r["year_fstype"]
+    sel_name     = r["corp_name"];    corp_code_r = r["corp_code"]
+    mixed_fs     = r["mixed_fs"];     years_sorted = sorted(year_data.keys())
 
-    st.markdown("#### STEP 3 · 결과  —  **{0}**".format(sel_name))
+    st.markdown(f"#### STEP 3 · 결과  —  **{sel_name}**")
 
-    fs_detail = "  |  ".join(["{0}: {1}".format(y, year_fstype[y]) for y in years_sorted])
+    fs_detail = "  |  ".join([f"{y}: {year_fstype[y]}" for y in years_sorted])
     if mixed_fs:
-        st.warning("⚠️ **연결/별도 혼재** — 일부 연도 자동 대체\n\n📋 **연도별 기준:** " + fs_detail)
+        st.warning(f"⚠️ **연결/별도 혼재** — 일부 연도 자동 대체\n\n📋 **연도별 기준:** {fs_detail}")
     else:
-        st.info("📋 조회 기준: **{0}** (전 연도 동일)".format(list(year_fstype.values())[0]))
+        st.info(f"📋 조회 기준: **{list(year_fstype.values())[0]}** (전 연도 동일)")
+
+    # 문서파싱 연도 표시
+    doc_years = [y for y,f in year_fstype.items() if "문서파싱" in f]
+    if doc_years:
+        st.warning(f"📄 {', '.join(doc_years)}년은 XBRL 데이터가 없어 공시 HTML 문서를 파싱했습니다. "
+                   "수치 정확성을 반드시 원문 감사보고서와 대조 확인하세요.")
 
     info = get_corp_info(corp_code_r)
     if info.get("status") == "000":
         with st.expander("기업 기본 정보", expanded=False):
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("기업명",  info.get("corp_name", "-"))
-            c2.metric("대표자",  info.get("ceo_nm", "-"))
-            c3.metric("설립일",  info.get("est_dt", "-"))
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("기업명",  info.get("corp_name","-"))
+            c2.metric("대표자",  info.get("ceo_nm","-"))
+            c3.metric("설립일",  info.get("est_dt","-"))
             c4.metric("결산월", (info.get("acc_mt") or "-") + "월")
 
     with st.expander("1단계: 원재료 데이터 수집 (단위: 억원)", expanded=False):
@@ -536,8 +640,8 @@ if "result" in st.session_state:
     with st.expander("2단계: EBITDA / 현금성자산 / 총차입금 계산", expanded=False):
         for year in years_sorted:
             d = year_data[year]
-            st.markdown("**── {0}년 ({1}) ──**".format(year, year_fstype.get(year, "-")))
-            ca, cb, cc = st.columns(3)
+            st.markdown(f"**── {year}년 ({year_fstype.get(year,'-')}) ──**")
+            ca,cb,cc = st.columns(3)
             with ca:
                 st.markdown("**EBITDA**")
                 st.code(d.get("_ebitda_calc") or "데이터 부족", language=None)
@@ -547,12 +651,11 @@ if "result" in st.session_state:
             with cc:
                 st.markdown("**총차입금**")
                 st.code(d.get("_debt_calc") or "데이터 부족", language=None)
-            dp = d.get("_debt_parts", [])
+            dp = d.get("_debt_parts",[])
             if dp:
                 st.dataframe(
-                    pd.DataFrame([{"항목": k, "금액(억원)": fmt_uk(to_uk(v))} for k,v in dp]
-                                 + [{"항목": "합계",
-                                     "금액(억원)": fmt_uk(to_uk(sum(v for _,v in dp)))}]),
+                    pd.DataFrame([{"항목":k,"금액(억원)":fmt_uk(to_uk(v))} for k,v in dp]
+                                 + [{"항목":"합계","금액(억원)":fmt_uk(to_uk(sum(v for _,v in dp)))}]),
                     use_container_width=False, hide_index=True)
 
     st.markdown("##### 최종 요약 재무제표 (단위: 억원)")
@@ -560,8 +663,7 @@ if "result" in st.session_state:
     st.dataframe(summary_df, use_container_width=True, hide_index=True, height=700)
 
     with st.expander("교차 검증", expanded=False):
-        vrows = [{"연도": y,
-                  "재무제표 종류":    year_fstype.get(y,"-"),
+        vrows = [{"연도":y, "재무제표 종류":year_fstype.get(y,"-"),
                   "EBITDA(계산)":     fmt_uk(to_uk(year_data[y].get("EBITDA"))),
                   "현금성자산(계산)": fmt_uk(to_uk(year_data[y].get("현금성자산"))),
                   "총차입금(계산)":   fmt_uk(to_uk(year_data[y].get("총차입금")))}
@@ -574,9 +676,8 @@ if "result" in st.session_state:
     for acc, color in zip(["매출액","EBITDA","영업이익","당기순이익"],
                            ["#1f77b4","#9467bd","#2ca02c","#ff7f0e"]):
         vals = [to_uk(year_data[y].get(acc)) for y in years_sorted]
-        fig.add_trace(go.Bar(
-            name=acc, x=years_sorted, y=vals, marker_color=color,
-            text=["{:,.0f}".format(v) if v is not None else "-" for v in vals],
+        fig.add_trace(go.Bar(name=acc, x=years_sorted, y=vals, marker_color=color,
+            text=[f"{v:,.0f}" if v is not None else "-" for v in vals],
             textposition="outside"))
     fig.update_layout(barmode="group", yaxis_title="억원",
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
@@ -585,4 +686,4 @@ if "result" in st.session_state:
 
     st.divider()
     csv = summary_df.to_csv(index=False, encoding="utf-8-sig")
-    st.download_button("⬇️ CSV 다운로드", csv, sel_name + "_재무제표.csv", "text/csv")
+    st.download_button("⬇️ CSV 다운로드", csv, sel_name+"_재무제표.csv", "text/csv")
