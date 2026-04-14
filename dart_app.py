@@ -318,14 +318,11 @@ def fetch_dart_document(rcept_no, dcm_no):
 @st.cache_data(ttl=3600)
 def try_document_zip(rcept_no):
     """
-    document.xml ZIP 다운로드 → HTML + PDF bytes 추출.
-    반환: (html_combined, pdf_bytes_list, zip_meta)
-      - html_combined : str | None
-      - pdf_bytes_list: list[bytes]
-      - zip_meta      : dict  (로깅용 — files 목록, 에러 메시지 등)
+    document.xml ZIP 다운로드 → HTML + XML + PDF bytes 추출.
+    반환: (html_combined, pdf_bytes_list, xml_bytes_list, zip_meta)
     """
-    meta = {"status": "not_tried", "files": [], "error": None,
-            "html_count": 0, "pdf_count": 0}
+    meta = {"status":"not_tried","files":[],"error":None,
+            "html_count":0,"pdf_count":0,"xml_count":0}
     try:
         r = requests_get_with_retry(
             "https://opendart.fss.or.kr/api/document.xml",
@@ -334,11 +331,53 @@ def try_document_zip(rcept_no):
         meta["http_status"] = r.status_code
         meta["content_len"] = len(r.content)
 
-        # XML 에러 응답 감지 (ZIP이 아닌 XML로 에러 반환하는 경우)
-        if r.content[:5] == b"<?xml":
+        # 에러 XML 응답 감지
+        if r.content[:5] == b"<?xml" and b"<result>" in r.content[:500]:
             meta["status"] = "api_error"
             meta["error"]  = r.content[:300].decode("utf-8","ignore")
-            return None, [], meta
+            return None, [], [], meta
+
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        all_files  = z.namelist()
+        html_files = [f for f in all_files if f.lower().endswith((".html",".htm"))]
+        pdf_files  = [f for f in all_files if f.lower().endswith(".pdf")]
+        xml_files  = [f for f in all_files
+                      if f.lower().endswith(".xml")
+                      and not f.lower().endswith((".xsd",".xbrl"))]
+        meta.update({"files":all_files,"html_count":len(html_files),
+                     "pdf_count":len(pdf_files),"xml_count":len(xml_files),
+                     "status":"zip_ok"})
+
+        # HTML
+        combined = ""
+        for fname in html_files[:15]:
+            for enc in ["utf-8","cp949","euc-kr"]:
+                try:
+                    combined += z.read(fname).decode(enc, errors="ignore") + "\n"
+                    break
+                except: continue
+
+        # XML (DART 자체 포맷)
+        xml_bytes_list = []
+        for fname in xml_files[:5]:
+            try: xml_bytes_list.append((fname, z.read(fname)))
+            except: continue
+
+        # PDF
+        pdf_bytes_list = []
+        for fname in sorted(pdf_files)[:5]:
+            try: pdf_bytes_list.append(z.read(fname))
+            except: continue
+
+        return combined or None, pdf_bytes_list, xml_bytes_list, meta
+
+    except zipfile.BadZipFile as e:
+        meta["status"]="bad_zip"; meta["error"]=str(e)
+        return None, [], [], meta
+    except Exception as e:
+        meta["status"]="exception"; meta["error"]=str(e)
+        return None, [], [], meta
+
 
         z = zipfile.ZipFile(io.BytesIO(r.content))
         all_files  = z.namelist()
@@ -370,6 +409,86 @@ def try_document_zip(rcept_no):
     except Exception as e:
         meta["status"] = "exception"; meta["error"] = str(e)
         return None, [], meta
+
+
+
+def parse_dart_xml(xml_bytes, log=None):
+    """
+    DART 비상장 감사보고서 XML 파싱.
+    구조 A: XML 안에 HTML 테이블이 텍스트로 포함 → html.parser로 파싱
+    구조 B: XML 자체가 계정 데이터를 포함    → 텍스트 줄 파싱
+    """
+    def L(m):
+        if log is not None: log.append(m)
+
+    text = None
+    for enc in ["utf-8","cp949","euc-kr","utf-16"]:
+        try:
+            decoded = xml_bytes.decode(enc, errors="ignore")
+            if len(decoded) > 200:
+                text = decoded
+                L(f"      인코딩: {enc}, {len(text):,}chars")
+                break
+        except: continue
+    if not text:
+        L("      ❌ 디코딩 실패")
+        return {}
+
+    # A) HTML 파서로 테이블 추출 (XML 안에 HTML 구조 있을 때)
+    results = parse_html_tables(text, log)
+    if "매출액" in results:
+        L(f"      ✅ HTML구조 파싱 성공")
+        return results
+
+    # B) 텍스트 줄 기반 파싱
+    import re
+    KWDS = {
+        "매출액":           ["매출액","수익(매출액)","영업수익","매출"],
+        "매출원가":         ["매출원가"],
+        "매출총이익":       ["매출총이익"],
+        "판관비":           ["판매비와관리비","판매비및관리비","판관비"],
+        "영업이익":         ["영업이익","영업손익"],
+        "당기순이익":       ["당기순이익","당기순손익"],
+        "자산총계":         ["자산총계"],
+        "현금및현금성자산": ["현금및현금성자산","현금과예금"],
+        "부채총계":         ["부채총계"],
+        "자본총계":         ["자본총계"],
+        "단기차입금":       ["단기차입금"],
+        "장기차입금":       ["장기차입금"],
+        "감가상각비":       ["감가상각비"],
+        "무형자산상각비":   ["무형자산상각비"],
+    }
+    unit = _detect_unit(text)
+    text_nospace = text.replace(" ","").replace("\xa0","").replace("\u3000","")
+    lines_raw  = text.splitlines()
+    lines_ns   = text_nospace.splitlines()
+
+    for i, (line_raw, line_ns) in enumerate(zip(lines_raw, lines_ns)):
+        for key, kwds in KWDS.items():
+            if key in results: continue
+            kw_matched = next(
+                (kw for kw in kwds
+                 if line_ns.startswith(kw.replace(" ","")) or
+                    kw.replace(" ","") in line_ns[:30]),
+                None
+            )
+            if not kw_matched:
+                continue
+            # 같은 줄에서 숫자 탐색 (쉼표 포함)
+            nums = re.findall(r"-?\d[\d,]{2,}", line_raw)
+            if not nums:
+                # 다음 3줄에서 숫자 탐색
+                for j in range(i+1, min(i+4, len(lines_raw))):
+                    nums = re.findall(r"-?\d[\d,]{2,}", lines_raw[j])
+                    if nums: break
+            for ns in nums:
+                v = _clean_num(ns)
+                if v is not None and abs(v) > 0:
+                    results[key] = v * unit
+                    break
+    if results:
+        L(f"      텍스트파싱: {len(results)}개 → {list(results.keys())}")
+    return results
 
 
 def parse_html_tables(html_text, log=None):
@@ -458,18 +577,34 @@ def analyze_from_document(corp_code, year):
 
     raw = {}
 
-    # ── 방법1: document.xml ZIP → HTML ────────────────────────────────────────
-    html_combined, pdf_bytes_list, zip_meta = try_document_zip(rcept_no)
+    # ── 방법1: document.xml ZIP ────────────────────────────────────────────────
+    html_combined, pdf_bytes_list, xml_bytes_list, zip_meta = try_document_zip(rcept_no)
     log.append(f"방법1 ZIP: status={zip_meta['status']}, "
-               f"html={zip_meta['html_count']}, pdf={zip_meta['pdf_count']}, "
+               f"html={zip_meta.get('html_count',0)}, "
+               f"xml={zip_meta.get('xml_count',0)}, "
+               f"pdf={zip_meta.get('pdf_count',0)}, "
                f"files={zip_meta['files'][:5]}")
     if zip_meta.get("error"):
         log.append(f"  오류: {zip_meta['error'][:200]}")
+
+    # 1-A: HTML 파싱
     if html_combined:
-        log.append(f"  HTML {len(html_combined):,} bytes 파싱 시작")
+        log.append(f"  1-A HTML {len(html_combined):,}bytes")
         raw = parse_html_tables(html_combined, log)
 
-    # ── 방법2: ZIP 내 PDF 파싱 (pdfplumber 필수) ─────────────────────────────
+    # 1-B: DART XML 파싱 (비상장 감사보고서 전용)
+    if "매출액" not in raw and xml_bytes_list:
+        log.append(f"  1-B XML 파싱 ({len(xml_bytes_list)}개)")
+        for fname, xb in xml_bytes_list:
+            log.append(f"    {fname} ({len(xb):,}bytes)")
+            res = parse_dart_xml(xb, log)
+            if len(res) > len(raw):
+                raw = res
+            if "매출액" in raw:
+                log.append(f"    ✅ XML에서 매출액 추출 성공")
+                break
+
+    # ── 방법2: ZIP 내 PDF 파싱 (pdfplumber 필수) ────────────────────────────
     if "매출액" not in raw and pdf_bytes_list:
         log.append(f"방법2 PDF 파싱 ({len(pdf_bytes_list)}개 파일)")
         try:
