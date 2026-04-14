@@ -248,31 +248,39 @@ def find_by_name(df, kw, col="thstrm_amount"):
 # ── DART 공시 문서 파싱 (비상장 기업 XBRL 없을 때 사용) ───────────────────────
 @st.cache_data(ttl=1800)
 def find_filing_rcept_no(corp_code, year):
-    """해당 연도 사업/감사보고서 접수번호 조회"""
+    """
+    해당 연도 감사/사업보고서 접수번호 조회.
+    - 비상장 기업 감사보고서는 pblntf_ty="F"(외부감사관련)에 등록됨
+    - 사업보고서는 pblntf_ty="A"(정기공시)에 등록됨
+    - 날짜 범위: 당해 1월 ~ 익년 12월 (늦은 제출 완전 대응)
+    """
     bgn = f"{year}0101"
-    end = f"{int(year)+1}0630"   # 다음해 상반기까지 (지연 제출 대응)
+    end = f"{int(year)+1}1231"   # ← 다음해 말까지 (기존: +6개월 → 수정: +18개월)
 
-    for pblntf_ty in ["A", "F", ""]:   # 정기공시 → 외부감사관련 → 전체
+    # F(외부감사관련) 먼저 → A(정기공시) → 전체 순으로 시도
+    # 비상장 감사보고서는 F에만 있으므로 F를 1순위로
+    for pblntf_ty in ["F", "A", ""]:
         try:
             r = requests_get_with_retry(
                 "https://opendart.fss.or.kr/api/list.json",
                 params={"crtfc_key": API_KEY, "corp_code": corp_code,
                         "bgn_de": bgn, "end_de": end,
-                        "pblntf_ty": pblntf_ty, "page_count": 20},
+                        "pblntf_ty": pblntf_ty, "page_count": 40},  # ← 40건으로 확대
                 timeout=30)
             data = r.json()
             if data.get("status") != "000" or not data.get("list"):
                 continue
             items = data["list"]
-            # 사업보고서 / 감사보고서 우선
-            for kw in ["사업보고서", "감사보고서", "연결감사"]:
+            # 감사보고서 > 사업보고서 > 연결감사 순 우선 매칭
+            for kw in ["감사보고서", "사업보고서", "연결감사"]:
                 for item in items:
-                    if kw in item.get("report_nm",""):
-                        return item["rcept_no"]
-            return items[0]["rcept_no"]
+                    if kw in item.get("report_nm", ""):
+                        return item["rcept_no"], item.get("report_nm", "")
+            # 키워드 매칭 없으면 첫 번째 항목 사용
+            return items[0]["rcept_no"], items[0].get("report_nm", "")
         except:
             continue
-    return None
+    return None, None
 
 
 @st.cache_data(ttl=3600)
@@ -379,20 +387,21 @@ def parse_html_financials(html_content):
 
 def analyze_from_document(corp_code, year):
     """XBRL 없는 경우: 공시 HTML 문서 파싱으로 재무 수치 추출"""
-    rcept_no = find_filing_rcept_no(corp_code, year)
+    rcept_no, report_nm = find_filing_rcept_no(corp_code, year)
     if not rcept_no:
-        return None, None, "공시 없음"
+        return None, None, "DART 공시 목록에서 감사/사업보고서를 찾지 못했습니다"
 
     html = get_document_html(rcept_no)
     if not html:
-        return None, None, "문서 다운로드 실패"
+        return None, None, f"문서 다운로드 실패 (rcept_no={rcept_no})"
 
     raw = parse_html_financials(html)
     if not raw or "매출액" not in raw:
-        return None, None, "재무데이터 파싱 실패"
+        return None, None, f"재무데이터 파싱 실패 — 공시문서: {report_nm}"
 
     raw = compute_derived(raw)
-    return raw, "별도재무제표(문서파싱)", None
+    label = f"별도재무제표(문서파싱·{report_nm})" if report_nm else "별도재무제표(문서파싱)"
+    return raw, label, None
 
 
 # ── 메인 분석 함수 (XBRL → 문서파싱 순서로 시도) ─────────────────────────────
@@ -516,7 +525,7 @@ if "search_rows" in st.session_state:
     rows = st.session_state["search_rows"]
     display_df = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")}
                                 for r in rows])
-    st.caption(f"🔍 {len(rows)}개 기업 — 행을 클릭하면 바로 선택됩니다")
+    st.caption(f"🔍 {len(rows)}개 기업 검색됨 — 원하는 기업 행의 아무 곳이나 클릭하면 즉시 선택됩니다")
 
     event = st.dataframe(display_df, use_container_width=True, hide_index=True,
                          selection_mode="single-row", on_select="rerun", key="corp_table")
@@ -563,11 +572,6 @@ if st.session_state.get("step2_ready"):
 
     selected_years = [str(y) for y in range(int(year_from), int(year_to)+1)]
     st.caption(f"📅 {year_from}년 ~ {year_to}년 ({len(selected_years)}개 연도)")
-
-    # 비상장 안내
-    if corp.get("상장구분") in ("비상장","기타(비상장)"):
-        st.info("ℹ️ 비상장 기업: XBRL 조회 실패 시 공시 HTML 문서를 직접 파싱합니다. "
-                "DART에 아무 공시도 없는 기업은 조회가 불가합니다.")
 
     if st.button("📊 재무제표 출력", type="primary", use_container_width=True):
         year_data, year_fstype = {}, {}
