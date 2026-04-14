@@ -14,38 +14,12 @@ st.set_page_config(page_title="DART 재무 분석", page_icon="📈", layout="wi
 # ── 전역 CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* 기업 검색 결과 테이블 */
-.corp-table { width:100%; border-collapse:collapse; font-size:0.88rem; margin-top:4px; }
-.corp-table thead tr { background:#2c3e50; color:#fff; }
-.corp-table thead th { padding:9px 14px; text-align:left; font-weight:600; border:none; }
-.corp-table tbody tr { border-bottom:1px solid #e0e3e8; background:#fff; cursor:pointer; transition:background 0.12s; }
-.corp-table tbody tr:hover { background:#e74c3c !important; color:#fff !important; }
-.corp-table tbody tr.selected-row { background:#1a56db !important; color:#fff !important; font-weight:700; }
-.corp-table tbody td { padding:8px 14px; }
-
-/* radio 원 숨김 — 이름만 표시 */
-div[data-testid="stRadio"] > div { gap:0 !important; }
-div[data-testid="stRadio"] > div > label {
-    padding: 7px 14px;
-    margin: 0;
-    border-bottom: 1px solid #e0e3e8;
-    cursor: pointer;
-    transition: background 0.12s;
-    width: 100%;
-    font-size: 0.88rem;
+/* 기간선택 버튼 소형화 */
+div[data-testid="column"] button[kind="secondary"] {
+    padding: 2px 6px !important;
+    font-size: 0.78rem !important;
+    min-height: 28px !important;
 }
-div[data-testid="stRadio"] > div > label:hover {
-    background: #e74c3c !important;
-    color: #fff !important;
-}
-div[data-testid="stRadio"] > div > label[data-baseweb="radio"]:has(input:checked) {
-    background: #1a56db !important;
-    color: #fff !important;
-    font-weight: 700;
-}
-/* radio 원 자체 숨김 */
-div[data-testid="stRadio"] div[data-testid="stMarkdownContainer"] + div { display:none !important; }
-div[data-testid="stRadio"] > div > label > div:first-child { display:none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -168,9 +142,16 @@ def fmt_uk(val):
 def fmt_pct(val): return "-" if val is None else "{:.1f}%".format(val)
 
 def _detect_unit(text):
-    t = text.replace(" ","").replace("\xa0","")
-    for m,v in [("단위:억원",int(1e8)),("단위:백만원",int(1e6)),("단위:천원",int(1e3))]:
-        if m in t: return v
+    """단위 감지 — 다양한 표기 지원. 원 단위 환산 승수 반환."""
+    t = text.replace(" ","").replace("\xa0","").replace("　","")
+    # 억원
+    if any(p in t for p in ("단위:억원","(억원)","[억원]")): return int(1e8)
+    # 백만원
+    if any(p in t for p in ("단위:백만원","(백만원)","[백만원]")): return int(1e6)
+    # 천원
+    if any(p in t for p in ("단위:천원","(천원)","[천원]","단위:1,000원","단위:1000원")): return int(1e3)
+    # 원 명시
+    if any(p in t for p in ("단위:원","(단위:원)")): return 1
     return 1
 
 def _clean_num(s):
@@ -261,22 +242,30 @@ def find_by_name(df, kw, col="thstrm_amount"):
 # ── 비상장 문서 파싱 ──────────────────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def find_filing(corp_code, year):
-    bgn, end = f"{year}0101", f"{int(year)+1}1231"
+    """
+    감사/사업보고서 접수번호 조회.
+    - F(외부감사관련) 먼저 → A(정기공시) → 전체
+    - 날짜범위: 당해 1월 ~ 익년 18개월 (늦은 제출 완전 대응)
+    """
+    bgn = f"{year}0101"
+    end = f"{int(year)+2}0630"   # ← 2년 후 6월까지 (이전 연도 보고서 포함)
     for pblntf_ty in ["F","A",""]:
         try:
             r = requests_get_with_retry(
                 "https://opendart.fss.or.kr/api/list.json",
                 params={"crtfc_key": API_KEY, "corp_code": corp_code,
                         "bgn_de": bgn, "end_de": end,
-                        "pblntf_ty": pblntf_ty, "page_count": 40},
+                        "pblntf_ty": pblntf_ty, "page_count": 100},
                 timeout=30)
             data = r.json()
             if data.get("status") != "000" or not data.get("list"): continue
             items = data["list"]
-            for kw in ["감사보고서","사업보고서","연결감사"]:
+            # 당해 결산 연도가 포함된 보고서 우선 (report_nm에 year 포함 또는 키워드 매칭)
+            for kw in ["감사보고서","사업보고서","연결감사보고서","재무제표"]:
                 for item in items:
                     if kw in item.get("report_nm",""):
                         return item["rcept_no"], item.get("report_nm","")
+            # 키워드 없으면 첫번째
             return items[0]["rcept_no"], items[0].get("report_nm","")
         except: continue
     return None, None
@@ -632,61 +621,39 @@ if search_btn and q:
         else:
             st.error("오류: " + err)
 
-# ── 기업 선택: HTML 표 (읽기) + 라디오 (선택) ────────────────────────────────
+# ── 기업 선택: st.dataframe 단독 (행 클릭 선택) ──────────────────────────────
 if "search_rows" in st.session_state:
-    rows    = st.session_state["search_rows"]
-    sel_idx = st.session_state.get("sel_idx", None)
-
-    # ① 헤더 테이블 (HTML)
-    header_html = """
-<table class="corp-table">
-  <thead>
-    <tr>
-      <th style="width:30%">기업명</th>
-      <th style="width:18%">대표자</th>
-      <th style="width:36%">업종</th>
-      <th style="width:16%">상장구분</th>
-    </tr>
-  </thead>
-  <tbody>
-"""
-    for i, r in enumerate(rows):
-        cls = "selected-row" if i == sel_idx else ""
-        header_html += (
-            f'<tr class="corp-row {cls}">'
-            f'<td>{r["기업명"]}</td>'
-            f'<td>{r["대표자"]}</td>'
-            f'<td>{r["업종"]}</td>'
-            f'<td>{r["상장구분"]}</td>'
-            f'</tr>\n'
-        )
-    header_html += "</tbody></table>"
-    st.markdown(header_html, unsafe_allow_html=True)
-
-    st.caption("▼ 아래에서 선택하세요 (클릭하면 즉시 적용)")
-
-    # ② 라디오 — 처음엔 아무것도 선택 안 됨 (index=None)
-    radio_opts = [
-        f"{r['기업명']}  ·  {r['대표자']}  ·  {r['상장구분']}"
+    rows = st.session_state["search_rows"]
+    display_df = pd.DataFrame([
+        {"기업명": r["기업명"], "대표자": r["대표자"],
+         "업종": r["업종"], "상장구분": r["상장구분"]}
         for r in rows
-    ]
-    chosen_label = st.radio(
-        "선택",
-        radio_opts,
-        index=sel_idx,          # None이면 아무것도 선택 안 됨
-        label_visibility="collapsed",
-        key="corp_radio",
-    )
+    ])
+    st.caption(f"🔍 {len(rows)}개 기업 — 행을 클릭하면 선택됩니다")
 
-    if chosen_label is not None:
-        new_idx = radio_opts.index(chosen_label)
-        if new_idx != sel_idx:
-            st.session_state["sel_idx"]     = new_idx
-            st.session_state["chosen_corp"] = rows[new_idx]
+    sel = st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="single-row",
+        on_select="rerun",
+        key="corp_df_sel",
+        column_config={
+            "기업명":   st.column_config.TextColumn(width="medium"),
+            "대표자":   st.column_config.TextColumn(width="small"),
+            "업종":     st.column_config.TextColumn(width="large"),
+            "상장구분": st.column_config.TextColumn(width="small"),
+        },
+    )
+    selected_rows = sel.selection.rows
+    if selected_rows:
+        idx    = selected_rows[0]
+        chosen = rows[idx]
+        prev   = st.session_state.get("chosen_corp", {})
+        if prev.get("_corp_code") != chosen["_corp_code"]:
+            st.session_state["chosen_corp"] = chosen
             st.session_state["step2_ready"] = True
             st.session_state.pop("result", None)
-            st.rerun()
-        chosen = rows[new_idx]
         st.success(f"✅ 선택됨: **{chosen['기업명']}** | {chosen['대표자']} | {chosen['상장구분']}")
 
 st.divider()
@@ -699,20 +666,44 @@ if st.session_state.get("step2_ready"):
 
     st.markdown(f"#### STEP 2 · 조회 설정  —  **{corp_name}**")
 
-    all_years    = [str(y) for y in range(CURRENT_YEAR, 2009, -1)]
-    default_to   = str(CURRENT_YEAR - 1)
-    default_from = str(CURRENT_YEAR - 5)
+    all_years  = [str(y) for y in range(CURRENT_YEAR, 2009, -1)]
+    latest_yr  = CURRENT_YEAR - 1
 
-    col_fs, col_yr1, col_yr2 = st.columns([3,1,1])
+    # 기간 선택 버튼으로 시작연도 preset
+    if "yr_from" not in st.session_state: st.session_state["yr_from"] = str(latest_yr - 4)
+    if "yr_to"   not in st.session_state: st.session_state["yr_to"]   = str(latest_yr)
+
+    col_fs, col_period, col_yr1, col_yr2 = st.columns([3, 1.5, 1, 1])
     with col_fs:
         fs_pref = st.radio("재무제표 구분", ["연결 우선","별도 우선"], index=0, horizontal=True)
         fs_preference = "CFS" if fs_pref == "연결 우선" else "OFS"
+    with col_period:
+        st.markdown("<div style='font-size:0.82rem;color:#555;margin-bottom:4px'>기간 선택</div>", unsafe_allow_html=True)
+        pb1, pb2, pb3 = st.columns(3)
+        if pb1.button("5년",  use_container_width=True, key="p5"):
+            st.session_state["yr_from"] = str(latest_yr - 4)
+            st.session_state["yr_to"]   = str(latest_yr)
+            st.rerun()
+        if pb2.button("10년", use_container_width=True, key="p10"):
+            st.session_state["yr_from"] = str(latest_yr - 9)
+            st.session_state["yr_to"]   = str(latest_yr)
+            st.rerun()
+        if pb3.button("20년", use_container_width=True, key="p20"):
+            st.session_state["yr_from"] = str(max(2010, latest_yr - 19))
+            st.session_state["yr_to"]   = str(latest_yr)
+            st.rerun()
     with col_yr1:
+        yr_from_default = st.session_state["yr_from"]
         year_from = st.selectbox("시작 연도", all_years,
-            index=all_years.index(default_from) if default_from in all_years else len(all_years)-1)
+            index=all_years.index(yr_from_default) if yr_from_default in all_years else len(all_years)-1,
+            key="sel_yr_from")
+        st.session_state["yr_from"] = year_from
     with col_yr2:
+        yr_to_default = st.session_state["yr_to"]
         year_to = st.selectbox("종료 연도", all_years,
-            index=all_years.index(default_to) if default_to in all_years else 0)
+            index=all_years.index(yr_to_default) if yr_to_default in all_years else 0,
+            key="sel_yr_to")
+        st.session_state["yr_to"] = year_to
 
     if int(year_from) > int(year_to):
         st.warning("⚠️ 시작 연도가 종료 연도보다 큽니다."); st.stop()
@@ -817,7 +808,12 @@ if "result" in st.session_state:
 
     st.markdown("##### 최종 요약 재무제표 (단위: 억원)")
     summary_df = build_table(year_data)
-    st.dataframe(summary_df, use_container_width=True, hide_index=True, height=700)
+    # 첫 컬럼(계정) 좌측, 연도 컬럼 우측 정렬
+    col_cfg = {"계정": st.column_config.TextColumn("계정", width="medium")}
+    for yr_col in [c for c in summary_df.columns if c != "계정"]:
+        col_cfg[yr_col] = st.column_config.TextColumn(yr_col, width="small")
+    st.dataframe(summary_df, use_container_width=True, hide_index=True,
+                 height=700, column_config=col_cfg)
 
     with st.expander("교차 검증", expanded=False):
         vrows = [{"연도":y,"재무제표 종류":year_fstype.get(y,"-"),
