@@ -37,6 +37,7 @@ def requests_get_with_retry(url, params=None, timeout=60, max_retries=4):
             raise e
     raise last_exc
 
+# ── 로그인 ────────────────────────────────────────────────────────────────────
 def check_password():
     if st.session_state.get("authenticated"):
         return True
@@ -61,6 +62,7 @@ if not check_password():
 API_KEY      = st.secrets["DART_API_KEY"]
 CURRENT_YEAR = datetime.now().year
 
+# ── 계정 ID 매핑 ──────────────────────────────────────────────────────────────
 IS_IDS = {
     "매출액":     ["ifrs-full_Revenue", "dart_Revenue"],
     "매출원가":   ["ifrs-full_CostOfSales", "dart_CostOfSales"],
@@ -91,8 +93,10 @@ CF_IDS = {
     "감가상각비":     ["ifrs-full_AdjustmentsForDepreciationExpense", "dart_DepreciationExpenses"],
     "무형자산상각비": ["ifrs-full_AdjustmentsForAmortisationExpense", "dart_AmortisationExpenses"],
 }
-REPORT_CODE = "11011"
 
+CORP_CLS_MAP = {"Y": "유가증권", "K": "코스닥", "N": "코넥스", "E": "기타(비상장)"}
+
+# ── 유틸 ──────────────────────────────────────────────────────────────────────
 def parse_amount(val):
     try:
         s = str(val).replace(",", "").replace(" ", "")
@@ -113,16 +117,9 @@ def fmt_uk(val):
 def fmt_pct(val):
     return "-" if val is None else "{:.1f}%".format(val)
 
-def make_corp_label(row):
-    code = row["stock_code"]
-    return "{} ({})".format(row["corp_name"], code if code else "비상장")
-
+# ── DART API ──────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400)
 def get_corp_list():
-    """
-    1순위: data/corpcode.csv (GitHub에 커밋된 파일) — 빠르고 안정적
-    2순위: DART 서버 직접 다운로드 (해외 IP 차단 위험)
-    """
     import os
     csv_path = os.path.join(os.path.dirname(__file__), "data", "corpcode.csv")
     if os.path.exists(csv_path):
@@ -142,6 +139,7 @@ def get_corp_list():
 def search_corp(name, df):
     return df[df["corp_name"].str.contains(name, na=False)].reset_index(drop=True)
 
+@st.cache_data(ttl=3600)
 def get_corp_info(corp_code):
     try:
         r = requests_get_with_retry(
@@ -183,22 +181,47 @@ def find_by_name(df, kw, col="thstrm_amount"):
     rows = df[df["account_nm"].str.contains(kw, na=False)]
     return parse_amount(rows.iloc[0][col]) if not rows.empty else None
 
-def analyze(corp_code, year, fs_preference="CFS"):
+def analyze(corp_code, year, fs_preference="CFS", is_listed=True):
+    """
+    [비상장 기업 지원]
+    - 비상장(is_listed=False): OFS 우선, 보고서 코드를 더 넓게 시도
+    - 상장: 기존 로직 유지
+    """
+    # 비상장이면 별도 우선으로 강제
+    if not is_listed:
+        fs_preference = "OFS"
+
     priority = ([("CFS","연결재무제표"),("OFS","별도재무제표")] if fs_preference == "CFS"
                 else [("OFS","별도재무제표"),("CFS","연결재무제표")])
+
     df, used_fs_type = None, None
-    for fs_div, fs_label in priority:
-        d, _ = get_fs(corp_code, year, REPORT_CODE, fs_div)
-        if d is not None and not d.empty:
-            df, used_fs_type = d, fs_label; break
+
+    # 시도할 보고서 코드 목록
+    # 상장: 11011(사업보고서) 중심
+    # 비상장: 11011도 시도하고, 감사보고서 계열도 폭넓게 시도
+    report_codes = ["11011", "11012", "11013", "11014"] if not is_listed else ["11011"]
+
+    for rcode in report_codes:
+        for fs_div, fs_label in priority:
+            d, _ = get_fs(corp_code, year, rcode, fs_div)
+            if d is not None and not d.empty:
+                suffix = "" if rcode == "11011" else "(분기/감사)"
+                df, used_fs_type = d, fs_label + suffix
+                break
+        if df is not None:
+            break
+
+    # 그래도 없으면 반대 fs_div까지 전수 시도
     if df is None:
-        for rcode in ["11011","11012"]:
-            for fs_div, fs_label in priority:
+        for rcode in ["11011", "11012", "11013", "11014"]:
+            for fs_div, fs_label in [("OFS","별도재무제표"),("CFS","연결재무제표")]:
                 d, _ = get_fs(corp_code, year, rcode, fs_div)
                 if d is not None and not d.empty:
-                    df, used_fs_type = d, fs_label + "(감사보고서)"; break
+                    df, used_fs_type = d, fs_label + "(대체조회)"
+                    break
             if df is not None:
                 break
+
     if df is None:
         return None, None, "데이터 없음"
 
@@ -266,7 +289,10 @@ def build_table(year_data):
     return pd.DataFrame([{"계정": r, **{y: table[r].get(y,"-") for y in years}}
                          for r in ROW_ORDER])
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# UI
+# ══════════════════════════════════════════════════════════════════════════════
 st.title("📊 DART 재무 분석")
 st.caption("금융감독원 전자공시(DART) 기반 요약 재무제표 자동 생성")
 
@@ -275,12 +301,16 @@ with st.sidebar:
         st.session_state.authenticated = False
         st.rerun()
 
-# STEP 1 — 기업 검색
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 1 — 기업 검색 → 테이블로 전체 표시 + 행 선택
+# ══════════════════════════════════════════════════════════════════════════════
 st.markdown("#### STEP 1 · 기업 검색")
+
 with st.form("search_form"):
     c1, c2 = st.columns([5, 1])
     with c1:
-        q = st.text_input("기업명", placeholder="예: 삼성전자, LG화학", label_visibility="collapsed")
+        q = st.text_input("기업명", placeholder="예: 삼성전자, 풀무원",
+                          label_visibility="collapsed")
     with c2:
         search_btn = st.form_submit_button("검색 🔍", use_container_width=True, type="primary")
 
@@ -291,51 +321,94 @@ if search_btn and q:
         res = search_corp(q, corp_df)
         if res.empty:
             st.warning("해당 기업을 찾을 수 없습니다.")
+            st.session_state.pop("search_display", None)
         else:
-            st.session_state["search_results"] = res
-            for k in ["step2_ready", "result"]:
-                st.session_state.pop(k, None)
+            # 검색 결과 최대 50개 — 각 기업의 대표자/업종 정보 조회
+            res = res.head(50).reset_index(drop=True)
+            with st.spinner("기업 상세 정보 조회 중... ({0}개)".format(len(res))):
+                rows = []
+                for _, row in res.iterrows():
+                    info = get_corp_info(row["corp_code"])
+                    rows.append({
+                        "corp_code":  row["corp_code"],
+                        "is_listed":  bool(row["stock_code"]),   # 상장 여부 내부 보관
+                        "기업명":     row["corp_name"],
+                        "대표자":     info.get("ceo_nm", "-") if info.get("status") == "000" else "-",
+                        "업종코드":   info.get("induty_code", "-") if info.get("status") == "000" else "-",
+                        "상장구분":   CORP_CLS_MAP.get(info.get("corp_cls",""), "비상장"),
+                        "종목코드":   row["stock_code"] if row["stock_code"] else "-",
+                    })
+            st.session_state["search_display"] = rows
+            st.session_state.pop("step2_ready", None)
+            st.session_state.pop("result", None)
     except Exception as e:
         err = str(e)
         if any(x in err for x in ["Timeout", "Connect", "timed out"]):
-            st.error("⏱️ DART 서버 연결 시간 초과.\n\n"
-                     "**해결:** `update_corpcode.py`를 로컬 PC에서 실행 후 "
-                     "`data/corpcode.csv`를 GitHub에 커밋하세요.")
+            st.error("⏱️ DART 서버 연결 초과. `update_corpcode.py` 실행 후 `data/corpcode.csv`를 GitHub에 커밋하세요.")
         else:
             st.error("오류: " + err)
 
-if "search_results" in st.session_state:
-    res = st.session_state["search_results"]
-    labels = [make_corp_label(row) for _, row in res.iterrows()]
-    chosen = st.selectbox("검색 결과에서 기업을 선택하세요", labels, key="corp_select")
-    chosen_idx  = labels.index(chosen)
-    chosen_corp = res.iloc[chosen_idx]
-    if st.button("이 기업으로 설정 ✓", type="primary"):
-        st.session_state["chosen_corp"] = chosen_corp.to_dict()
-        st.session_state["step2_ready"] = True
-        st.session_state.pop("result", None)
+# 검색 결과 — 전체 테이블 + 행 선택
+if "search_display" in st.session_state:
+    rows = st.session_state["search_display"]
+    # 화면 표시용 df (내부 키 제외)
+    display_df = pd.DataFrame([{k: v for k, v in r.items()
+                                 if k not in ("corp_code", "is_listed")}
+                                for r in rows])
+
+    st.caption("🔍 검색 결과 {0}개 — 행을 클릭해서 기업을 선택하세요".format(len(rows)))
+
+    event = st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="single-row",
+        on_select="rerun",
+        key="corp_table",
+    )
+
+    selected_rows = event.selection.rows
+    if selected_rows:
+        idx = selected_rows[0]
+        chosen = rows[idx]
+        st.success("선택됨: **{0}** ({1} / {2})".format(
+            chosen["기업명"], chosen["대표자"], chosen["상장구분"]))
+
+        if st.button("이 기업으로 설정 ✓", type="primary"):
+            st.session_state["chosen_corp"] = chosen
+            st.session_state["step2_ready"] = True
+            st.session_state.pop("result", None)
 
 st.divider()
 
-# STEP 2 — 조회 설정
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2 — 재무제표 구분 + 연도 범위
+# ══════════════════════════════════════════════════════════════════════════════
 if st.session_state.get("step2_ready"):
     corp      = st.session_state["chosen_corp"]
     corp_code = corp["corp_code"]
-    corp_name = corp["corp_name"]
+    corp_name = corp["기업명"]
+    is_listed = corp.get("is_listed", True)
 
-    st.markdown("#### STEP 2 · 조회 설정  —  **{}**".format(corp_name))
+    st.markdown("#### STEP 2 · 조회 설정  —  **{0}**".format(corp_name))
 
-    col_fs, col_yr1, col_yr2 = st.columns([3, 1, 1])
-    all_years = [str(y) for y in range(CURRENT_YEAR, 2009, -1)]
-
-    with col_fs:
-        fs_pref = st.radio(
-            "재무제표 구분", options=["연결 우선", "별도 우선"], index=0, horizontal=True,
-            help="연결 없는 연도는 별도로, 별도 없는 연도는 연결로 자동 대체됩니다.")
-        fs_preference = "CFS" if fs_pref == "연결 우선" else "OFS"
-
+    all_years    = [str(y) for y in range(CURRENT_YEAR, 2009, -1)]
     default_to   = str(CURRENT_YEAR - 1)
     default_from = str(CURRENT_YEAR - 5)
+
+    col_fs, col_yr1, col_yr2 = st.columns([3, 1, 1])
+
+    with col_fs:
+        # 비상장이면 "별도 우선" 고정 안내
+        if not is_listed:
+            st.info("ℹ️ 비상장 기업은 **별도재무제표** 기준으로 자동 조회됩니다.")
+            fs_preference = "OFS"
+        else:
+            fs_pref = st.radio(
+                "재무제표 구분", options=["연결 우선", "별도 우선"], index=0, horizontal=True,
+                help="연결 없는 연도는 별도로, 별도 없는 연도는 연결로 자동 대체됩니다.")
+            fs_preference = "CFS" if fs_pref == "연결 우선" else "OFS"
+
     with col_yr1:
         year_from = st.selectbox("시작 연도", all_years,
             index=all_years.index(default_from) if default_from in all_years else len(all_years)-1)
@@ -348,107 +421,64 @@ if st.session_state.get("step2_ready"):
         st.stop()
 
     selected_years = [str(y) for y in range(int(year_from), int(year_to) + 1)]
-    st.caption("📅 선택 연도: {}년 ~ {}년 ({}개 연도)".format(year_from, year_to, len(selected_years)))
+    st.caption("📅 {0}년 ~ {1}년 ({2}개 연도)".format(year_from, year_to, len(selected_years)))
 
-    with st.expander("➕ 구 사명(이전 법인명) 추가", expanded=False):
-        with st.form("old_search_form"):
-            old_q   = st.text_input("이전 사명 검색", placeholder="구 사명 입력")
-            old_btn = st.form_submit_button("검색")
-        if old_btn and old_q:
-            with st.spinner("검색 중..."):
-                cdf2 = get_corp_list()
-            old_res = search_corp(old_q, cdf2)
-            st.session_state["old_search_results"] = old_res if not old_res.empty else None
-            if old_res.empty:
-                st.warning("검색 결과 없음")
-        if st.session_state.get("old_search_results") is not None:
-            old_res2   = st.session_state["old_search_results"]
-            old_labels = [make_corp_label(row) for _, row in old_res2.iterrows()]
-            old_sel    = st.selectbox("이전 사명 선택", ["선택 안함"] + old_labels)
-            if old_sel != "선택 안함":
-                old_idx  = old_labels.index(old_sel)
-                old_code = old_res2.iloc[old_idx]["corp_code"]
-                oa, ob = st.columns(2)
-                with oa:
-                    o_from = st.selectbox("적용 시작 연도", all_years, index=len(all_years)//2)
-                with ob:
-                    o_to   = st.selectbox("적용 종료 연도", all_years,
-                                          index=min(len(all_years)//2 + 3, len(all_years)-1))
-                if st.button("추가 ✓"):
-                    if "old_corps" not in st.session_state:
-                        st.session_state["old_corps"] = []
-                    if old_code not in [x["corp_code"] for x in st.session_state["old_corps"]]:
-                        st.session_state["old_corps"].append({
-                            "corp_code": old_code,
-                            "corp_name": old_sel.split("(")[0].strip(),
-                            "year_from": o_from, "year_to": o_to,
-                        })
-                        st.success("추가 완료")
-                    else:
-                        st.warning("이미 추가된 법인입니다.")
-        if st.session_state.get("old_corps"):
-            st.markdown("**추가된 이전 사명:**")
-            for i, oc in enumerate(st.session_state["old_corps"]):
-                ca2, cb2 = st.columns([5, 1])
-                with ca2:
-                    st.write("• {} | {}~{}년".format(oc["corp_name"], oc["year_from"], oc["year_to"]))
-                with cb2:
-                    if st.button("삭제", key="del_{}".format(i)):
-                        st.session_state["old_corps"].pop(i); st.rerun()
+    st.markdown("")
 
     if st.button("📊 재무제표 출력", type="primary", use_container_width=True):
-        old_corps = st.session_state.get("old_corps", [])
-        def get_code_for_year(year):
-            for oc in old_corps:
-                if oc["year_from"] <= year <= oc["year_to"]:
-                    return oc["corp_code"], oc["corp_name"]
-            return corp_code, corp_name
-
-        year_data, year_source, year_fstype = {}, {}, {}
+        year_data, year_fstype = {}, {}
         prog = st.progress(0, text="데이터 수집 중...")
         for i, year in enumerate(selected_years):
-            cc, cn = get_code_for_year(year)
-            d, fs_used, err = analyze(cc, year, fs_preference)
+            d, fs_used, err = analyze(corp_code, year, fs_preference, is_listed)
             if d is not None:
-                year_data[year] = d; year_source[year] = cn; year_fstype[year] = fs_used
+                year_data[year]  = d
+                year_fstype[year] = fs_used
             else:
-                st.warning("{} 년: 데이터 없음".format(year))
-            prog.progress((i+1)/len(selected_years), text="{} 년 수집 완료".format(year))
+                st.warning("{0}년: 데이터 없음".format(year))
+            prog.progress((i+1)/len(selected_years), text="{0}년 수집 완료".format(year))
         prog.empty()
         if year_data:
             fs_set = set(year_fstype.values())
             st.session_state["result"] = {
-                "year_data": year_data, "year_source": year_source,
-                "year_fstype": year_fstype, "corp_name": corp_name, "corp_code": corp_code,
-                "mixed_fs": any("연결" in f for f in fs_set) and any("별도" in f for f in fs_set),
+                "year_data":  year_data,
+                "year_fstype": year_fstype,
+                "corp_name":  corp_name,
+                "corp_code":  corp_code,
+                "mixed_fs":   any("연결" in f for f in fs_set) and any("별도" in f for f in fs_set),
             }
         else:
             st.error("조회된 데이터가 없습니다.")
 
 st.divider()
 
+# ══════════════════════════════════════════════════════════════════════════════
 # STEP 3 — 결과
+# ══════════════════════════════════════════════════════════════════════════════
 if "result" in st.session_state:
     r = st.session_state["result"]
-    year_data = r["year_data"]; year_source = r["year_source"]
-    year_fstype = r["year_fstype"]; sel_name = r["corp_name"]
-    corp_code_r = r["corp_code"]; mixed_fs = r["mixed_fs"]
+    year_data    = r["year_data"]
+    year_fstype  = r["year_fstype"]
+    sel_name     = r["corp_name"]
+    corp_code_r  = r["corp_code"]
+    mixed_fs     = r["mixed_fs"]
     years_sorted = sorted(year_data.keys())
 
-    st.markdown("#### STEP 3 · 결과  —  **{}**".format(sel_name))
+    st.markdown("#### STEP 3 · 결과  —  **{0}**".format(sel_name))
 
-    fs_detail = "  |  ".join(["{}: {}".format(y, year_fstype[y]) for y in years_sorted])
+    fs_detail = "  |  ".join(["{0}: {1}".format(y, year_fstype[y]) for y in years_sorted])
     if mixed_fs:
-        st.warning("⚠️ **연결/별도 혼재** — 일부 연도 자동 대체 적용\n\n📋 **연도별 기준:** " + fs_detail)
+        st.warning("⚠️ **연결/별도 혼재** — 일부 연도 자동 대체\n\n📋 **연도별 기준:** " + fs_detail)
     else:
-        st.info("📋 조회 기준: **{}** (전 연도 동일)".format(list(year_fstype.values())[0]))
+        st.info("📋 조회 기준: **{0}** (전 연도 동일)".format(list(year_fstype.values())[0]))
 
     info = get_corp_info(corp_code_r)
     if info.get("status") == "000":
         with st.expander("기업 기본 정보", expanded=False):
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("기업명", info.get("corp_name","-")); c2.metric("대표자", info.get("ceo_nm","-"))
-            c3.metric("설립일", info.get("est_dt","-")); c4.metric("결산월", (info.get("acc_mt") or "-") + "월")
+            c1.metric("기업명",  info.get("corp_name", "-"))
+            c2.metric("대표자",  info.get("ceo_nm", "-"))
+            c3.metric("설립일",  info.get("est_dt", "-"))
+            c4.metric("결산월", (info.get("acc_mt") or "-") + "월")
 
     with st.expander("1단계: 원재료 데이터 수집 (단위: 억원)", expanded=False):
         raw_items = (list(IS_IDS.keys()) +
@@ -467,15 +497,17 @@ if "result" in st.session_state:
     with st.expander("2단계: EBITDA / 현금성자산 / 총차입금 계산", expanded=False):
         for year in years_sorted:
             d = year_data[year]
-            st.markdown("**── {} 년 ({} / {}) ──**".format(
-                year, year_source.get(year, sel_name), year_fstype.get(year, "-")))
+            st.markdown("**── {0}년 ({1}) ──**".format(year, year_fstype.get(year, "-")))
             ca, cb, cc = st.columns(3)
             with ca:
-                st.markdown("**EBITDA**"); st.code(d.get("_ebitda_calc") or "데이터 부족", language=None)
+                st.markdown("**EBITDA**")
+                st.code(d.get("_ebitda_calc") or "데이터 부족", language=None)
             with cb:
-                st.markdown("**현금성자산**"); st.code(d.get("_cash_calc") or "데이터 부족", language=None)
+                st.markdown("**현금성자산**")
+                st.code(d.get("_cash_calc") or "데이터 부족", language=None)
             with cc:
-                st.markdown("**총차입금**"); st.code(d.get("_debt_calc") or "데이터 부족", language=None)
+                st.markdown("**총차입금**")
+                st.code(d.get("_debt_calc") or "데이터 부족", language=None)
             dp = d.get("_debt_parts", [])
             if dp:
                 st.dataframe(
@@ -488,11 +520,11 @@ if "result" in st.session_state:
     st.dataframe(summary_df, use_container_width=True, hide_index=True, height=700)
 
     with st.expander("교차 검증", expanded=False):
-        vrows = [{"연도": y, "조회 법인": year_source.get(y, sel_name),
-                  "재무제표 종류": year_fstype.get(y,"-"),
-                  "EBITDA(계산)": fmt_uk(to_uk(year_data[y].get("EBITDA"))),
+        vrows = [{"연도": y,
+                  "재무제표 종류":    year_fstype.get(y,"-"),
+                  "EBITDA(계산)":     fmt_uk(to_uk(year_data[y].get("EBITDA"))),
                   "현금성자산(계산)": fmt_uk(to_uk(year_data[y].get("현금성자산"))),
-                  "총차입금(계산)": fmt_uk(to_uk(year_data[y].get("총차입금")))}
+                  "총차입금(계산)":   fmt_uk(to_uk(year_data[y].get("총차입금")))}
                  for y in years_sorted]
         st.dataframe(pd.DataFrame(vrows), use_container_width=True, hide_index=True)
         st.success("2단계 계산값과 최종 요약표 수치 일치 확인 완료")
@@ -502,7 +534,8 @@ if "result" in st.session_state:
     for acc, color in zip(["매출액","EBITDA","영업이익","당기순이익"],
                            ["#1f77b4","#9467bd","#2ca02c","#ff7f0e"]):
         vals = [to_uk(year_data[y].get(acc)) for y in years_sorted]
-        fig.add_trace(go.Bar(name=acc, x=years_sorted, y=vals, marker_color=color,
+        fig.add_trace(go.Bar(
+            name=acc, x=years_sorted, y=vals, marker_color=color,
             text=["{:,.0f}".format(v) if v is not None else "-" for v in vals],
             textposition="outside"))
     fig.update_layout(barmode="group", yaxis_title="억원",
