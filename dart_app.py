@@ -318,22 +318,37 @@ def fetch_dart_document(rcept_no, dcm_no):
 @st.cache_data(ttl=3600)
 def try_document_zip(rcept_no):
     """
-    document.xml ZIP 시도.
-    반환: (html_combined, pdf_bytes_list)
-      - html_combined : str or None
-      - pdf_bytes_list: list of bytes (각 PDF 파일 내용)
-    ZipFile 객체는 캐시 불가이므로 내부에서 모두 추출 후 반환.
+    document.xml ZIP 다운로드 → HTML + PDF bytes 추출.
+    반환: (html_combined, pdf_bytes_list, zip_meta)
+      - html_combined : str | None
+      - pdf_bytes_list: list[bytes]
+      - zip_meta      : dict  (로깅용 — files 목록, 에러 메시지 등)
     """
+    meta = {"status": "not_tried", "files": [], "error": None,
+            "html_count": 0, "pdf_count": 0}
     try:
         r = requests_get_with_retry(
             "https://opendart.fss.or.kr/api/document.xml",
             params={"crtfc_key": API_KEY, "rcept_no": rcept_no},
             timeout=120)
-        z = zipfile.ZipFile(io.BytesIO(r.content))
-        html_files = [f for f in z.namelist() if f.lower().endswith((".html",".htm"))]
-        pdf_files  = [f for f in z.namelist() if f.lower().endswith(".pdf")]
+        meta["http_status"] = r.status_code
+        meta["content_len"] = len(r.content)
 
-        # HTML 텍스트 추출
+        # XML 에러 응답 감지 (ZIP이 아닌 XML로 에러 반환하는 경우)
+        if r.content[:5] == b"<?xml":
+            meta["status"] = "api_error"
+            meta["error"]  = r.content[:300].decode("utf-8","ignore")
+            return None, [], meta
+
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        all_files  = z.namelist()
+        html_files = [f for f in all_files if f.lower().endswith((".html",".htm"))]
+        pdf_files  = [f for f in all_files if f.lower().endswith(".pdf")]
+        meta["files"]      = all_files
+        meta["html_count"] = len(html_files)
+        meta["pdf_count"]  = len(pdf_files)
+        meta["status"]     = "zip_ok"
+
         combined = ""
         for fname in html_files[:15]:
             for enc in ["utf-8","cp949","euc-kr"]:
@@ -342,16 +357,19 @@ def try_document_zip(rcept_no):
                     break
                 except: continue
 
-        # PDF bytes 추출 (ZipFile 객체 대신 bytes 리스트로 반환)
         pdf_bytes_list = []
-        for fname in sorted(pdf_files)[:3]:
-            try:
-                pdf_bytes_list.append(z.read(fname))
+        for fname in sorted(pdf_files)[:5]:
+            try: pdf_bytes_list.append(z.read(fname))
             except: continue
 
-        return combined or None, pdf_bytes_list
-    except:
-        return None, []
+        return combined or None, pdf_bytes_list, meta
+
+    except zipfile.BadZipFile as e:
+        meta["status"] = "bad_zip"; meta["error"] = str(e)
+        return None, [], meta
+    except Exception as e:
+        meta["status"] = "exception"; meta["error"] = str(e)
+        return None, [], meta
 
 
 def parse_html_tables(html_text, log=None):
@@ -440,45 +458,28 @@ def analyze_from_document(corp_code, year):
 
     raw = {}
 
-    # ── 방법1: document.xml ZIP ───────────────────────────────────────────────
-    html_combined, pdf_bytes_list = try_document_zip(rcept_no)
+    # ── 방법1: document.xml ZIP → HTML ────────────────────────────────────────
+    html_combined, pdf_bytes_list, zip_meta = try_document_zip(rcept_no)
+    log.append(f"방법1 ZIP: status={zip_meta['status']}, "
+               f"html={zip_meta['html_count']}, pdf={zip_meta['pdf_count']}, "
+               f"files={zip_meta['files'][:5]}")
+    if zip_meta.get("error"):
+        log.append(f"  오류: {zip_meta['error'][:200]}")
     if html_combined:
-        log.append(f"방법1-HTML: {len(html_combined):,} bytes")
+        log.append(f"  HTML {len(html_combined):,} bytes 파싱 시작")
         raw = parse_html_tables(html_combined, log)
 
-    # ── 방법2: index.json → 개별 문서 직접 fetch ─────────────────────────────
-    if "매출액" not in raw:
-        log.append("방법2: index.json → 개별 문서 직접 다운로드 시도")
-        docs = get_filing_docs(rcept_no)
-        log.append(f"  문서 목록: {len(docs)}개 → {[d.get('file_nm','?') for d in docs[:5]]}")
-        for doc in docs:
-            dcm_no  = doc.get("dcm_no","")
-            file_nm = doc.get("file_nm","")
-            if not dcm_no: continue
-            # 재무제표 관련 문서 우선
-            is_fin = any(kw in file_nm for kw in
-                         ["재무","손익","대차","자본","이익","감사","사업"])
-            if not is_fin and len(docs) > 3: continue
-            log.append(f"  fetch: {file_nm} (dcm_no={dcm_no})")
-            html = fetch_dart_document(rcept_no, dcm_no)
-            if html:
-                log.append(f"    HTML: {len(html):,} bytes")
-                candidate = parse_html_tables(html, log)
-                if "매출액" in candidate:
-                    raw = candidate
-                    break
-                elif len(candidate) > len(raw):
-                    raw = candidate
-
-    # ── 방법3: ZIP 내 PDF 파싱 ────────────────────────────────────────────────
+    # ── 방법2: ZIP 내 PDF 파싱 (pdfplumber 필수) ─────────────────────────────
     if "매출액" not in raw and pdf_bytes_list:
-        log.append(f"방법3: PDF 파싱 ({len(pdf_bytes_list)}개)")
+        log.append(f"방법2 PDF 파싱 ({len(pdf_bytes_list)}개 파일)")
         try:
             import pdfplumber
-            for pdf_bytes in pdf_bytes_list:
+            log.append("  pdfplumber 로드 성공")
+            for pdf_idx, pdf_bytes in enumerate(pdf_bytes_list):
                 try:
                     results_pdf = {}
                     full_txt    = ""
+                    log.append(f"  PDF #{pdf_idx+1}: {len(pdf_bytes):,} bytes")
                     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                         for page in pdf.pages[:100]:
                             full_txt += (page.extract_text() or "") + "\n"
@@ -509,14 +510,15 @@ def analyze_from_document(corp_code, year):
                         unit = _detect_unit(full_txt)
                         if unit > 1:
                             results_pdf = {k: v*unit for k,v in results_pdf.items()}
+                    log.append(f"    추출 {len(results_pdf)}개: {list(results_pdf.keys())}")
                     if "매출액" in results_pdf:
                         raw = results_pdf
-                        log.append(f"  ✅ PDF 파싱 성공: {list(raw.keys())}")
+                        log.append(f"  ✅ PDF 파싱 성공")
                         break
                 except Exception as e:
-                    log.append(f"  PDF 오류: {e}")
+                    log.append(f"  PDF #{pdf_idx+1} 오류: {e}")
         except ImportError:
-            log.append("  pdfplumber 미설치")
+            log.append("  ❌ pdfplumber 미설치 — requirements.txt에 pdfplumber 추가 필요")
 
     if not raw or "매출액" not in raw:
         log.append(f"❌ 파싱 실패 — 추출된 항목: {list(raw.keys())}")
