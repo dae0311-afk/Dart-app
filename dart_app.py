@@ -414,80 +414,80 @@ def try_document_zip(rcept_no):
 
 def parse_dart_xml(xml_bytes, log=None):
     """
-    DART 비상장 감사보고서 XML 파싱.
-    구조 A: XML 안에 HTML 테이블이 텍스트로 포함 → html.parser로 파싱
-    구조 B: XML 자체가 계정 데이터를 포함    → 텍스트 줄 파싱
+    DART 비상장 XML 파싱.
+    HTML 테이블 파싱(방법A) 실패 시 전문 텍스트 정규식 파싱(방법B)으로 fallback.
     """
     def L(m):
         if log is not None: log.append(m)
 
+    # 인코딩 감지
     text = None
     for enc in ["utf-8","cp949","euc-kr","utf-16"]:
         try:
             decoded = xml_bytes.decode(enc, errors="ignore")
             if len(decoded) > 200:
-                text = decoded
-                L(f"      인코딩: {enc}, {len(text):,}chars")
+                text = decoded; L(f"      인코딩: {enc}")
                 break
         except: continue
     if not text:
-        L("      ❌ 디코딩 실패")
-        return {}
+        L("      ❌ 디코딩 실패"); return {}
 
-    # A) HTML 파서로 테이블 추출 (XML 안에 HTML 구조 있을 때)
+    # ── 방법A: BeautifulSoup HTML 테이블 파싱 ─────────────────────────────────
     results = parse_html_tables(text, log)
     if "매출액" in results:
-        L(f"      ✅ HTML구조 파싱 성공")
         return results
 
-    # B) 텍스트 줄 기반 파싱
-    import re
-    KWDS = {
-        "매출액":           ["매출액","수익(매출액)","영업수익","매출"],
-        "매출원가":         ["매출원가"],
-        "매출총이익":       ["매출총이익"],
-        "판관비":           ["판매비와관리비","판매비및관리비","판관비"],
-        "영업이익":         ["영업이익","영업손익"],
-        "당기순이익":       ["당기순이익","당기순손익"],
-        "자산총계":         ["자산총계"],
-        "현금및현금성자산": ["현금및현금성자산","현금과예금"],
-        "부채총계":         ["부채총계"],
-        "자본총계":         ["자본총계"],
-        "단기차입금":       ["단기차입금"],
-        "장기차입금":       ["장기차입금"],
-        "감가상각비":       ["감가상각비"],
-        "무형자산상각비":   ["무형자산상각비"],
-    }
-    unit = _detect_unit(text)
-    text_nospace = text.replace(" ","").replace("\xa0","").replace("\u3000","")
-    lines_raw  = text.splitlines()
-    lines_ns   = text_nospace.splitlines()
+    # ── 방법B: 태그 제거 후 정규식으로 계정명+숫자 매칭 ─────────────────────────
+    # XML 태그 제거 → 순수 텍스트
+    clean = _re.sub(r"<[^>]+>", " ", text)
+    clean = _re.sub(r"[ \t]+", " ", clean)   # 공백 정규화
+    # 미리보기 (디버그)
+    preview_lines = [ln.strip() for ln in clean.splitlines() if ln.strip()][:20]
+    L(f"      텍스트 미리보기(앞20줄):")
+    for pl in preview_lines:
+        L(f"        {pl[:80]}")
 
-    for i, (line_raw, line_ns) in enumerate(zip(lines_raw, lines_ns)):
-        for key, kwds in KWDS.items():
-            if key in results: continue
-            kw_matched = next(
-                (kw for kw in kwds
-                 if line_ns.startswith(kw.replace(" ","")) or
-                    kw.replace(" ","") in line_ns[:30]),
-                None
-            )
-            if not kw_matched:
-                continue
-            # 같은 줄에서 숫자 탐색 (쉼표 포함)
-            nums = re.findall(r"-?\d[\d,]{2,}", line_raw)
-            if not nums:
-                # 다음 3줄에서 숫자 탐색
-                for j in range(i+1, min(i+4, len(lines_raw))):
-                    nums = re.findall(r"-?\d[\d,]{2,}", lines_raw[j])
-                    if nums: break
-            for ns in nums:
-                v = _clean_num(ns)
-                if v is not None and abs(v) > 0:
-                    results[key] = v * unit
-                    break
-    if results:
-        L(f"      텍스트파싱: {len(results)}개 → {list(results.keys())}")
+    unit = _detect_unit(text)
+    L(f"      단위: {unit:,}")
+
+    KWDS = {
+        "매출액":           r"매출액|수익\(매출액\)|영업수익",
+        "매출원가":         r"매출원가",
+        "매출총이익":       r"매출총이익",
+        "판관비":           r"판매비와관리비|판매비및관리비|판관비",
+        "영업이익":         r"영업이익|영업손익",
+        "당기순이익":       r"당기순이익|당기순손익",
+        "자산총계":         r"자산총계|자산합계",
+        "현금및현금성자산": r"현금및현금성자산|현금과예금",
+        "부채총계":         r"부채총계|부채합계",
+        "자본총계":         r"자본총계|자본합계",
+        "단기차입금":       r"단기차입금",
+        "장기차입금":       r"장기차입금",
+        "사채":             r"사채",
+        "감가상각비":       r"감가상각비",
+        "무형자산상각비":   r"무형자산상각비",
+    }
+
+    # 숫자 패턴 (쉼표 포함, 괄호 음수 포함)
+    NUM_PAT = _re.compile(r"(\(\d[\d,]+\)|\d[\d,]+)")
+
+    for key, kw_pat in KWDS.items():
+        if key in results:
+            continue
+        m = _re.search(kw_pat, clean)
+        if not m:
+            continue
+        # 키워드 다음 300자 내에서 숫자 탐색
+        window = clean[m.end(): m.end() + 300]
+        nums = NUM_PAT.findall(window)
+        for raw_n in nums:
+            v = _clean_num(raw_n)
+            if v is not None and abs(v) >= 100:   # 너무 작은 숫자 제외
+                results[key] = v * unit
+                L(f"      ✅ {key}: '{raw_n}' → {v * unit:,}")
+                break
+
+    L(f"      방법B 결과: {len(results)}개 → {list(results.keys())}")
     return results
 
 
@@ -785,8 +785,11 @@ if "search_rows" in st.session_state:
 /* 검색 입력창 라벨이 밝은 배경에서 안 보이는 문제 방지 */
 label[data-testid="stTextInputLabel"],
 div[data-testid="stTextInput"] label {
-    color: #1a1a2e !important;
-    font-weight: 600 !important;
+    color: #0a0a1a !important;
+    font-weight: 700 !important;
+    background: #d0d4e0 !important;
+    padding: 2px 6px;
+    border-radius: 4px;
 }
 div[data-testid="stRadio"] > label { display:none; }
 div[data-testid="stRadio"] > div { gap:0 !important; }
@@ -797,9 +800,9 @@ div[data-testid="stRadio"] > div > label {
     cursor:pointer; transition:background 0.15s;
     font-size:0.9rem; width:100%;
 }
-div[data-testid="stRadio"] > div > label:hover { background:#ffe0e0 !important; color:#c0392b !important; font-weight:600; }
+div[data-testid="stRadio"] > div > label:hover { background:#e74c3c !important; color:#fff !important; font-weight:700; }
 div[data-testid="stRadio"] > div > label:has(input:checked) {
-    background:#c8d9fc !important; font-weight:600;
+    background:#1a56db !important; color:#fff !important; font-weight:700;
 }
 div[data-testid="stRadio"] > div > label > div:first-child { display:none; }
 </style>
