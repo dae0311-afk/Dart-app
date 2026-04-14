@@ -325,83 +325,136 @@ def _extract_num(s):
     except: return None
 
 
-def parse_html_financials(html_content):
+def _clean_label(text):
+    """셀 라벨 정규화 — 공백·특수문자·주석번호 제거"""
+    import re
+    t = text.replace("\xa0","").replace("\u3000","").replace("\n","")
+    t = re.sub(r"[\s　]","", t)           # 모든 종류 공백 제거
+    t = re.sub(r"[①②③④⑤⑥⑦⑧⑨⑩]","", t)  # 주석 번호
+    t = re.sub(r"\([^)]*\)","", t)       # (주석) 괄호 제거 — 단, 음수는 별도처리
+    return t
+
+
+def parse_html_financials(html_content, _debug_log=None):
     """
-    DART HTML 문서에서 핵심 재무 수치 추출.
-    모든 <table>을 순회하며 계정명 키워드로 매칭.
+    DART HTML 문서에서 재무 수치 추출.
+    _debug_log: list → 파싱 과정 기록 (None이면 기록 안 함)
     반환값: {계정명: 원 단위 금액}
     """
+    def log(msg):
+        if _debug_log is not None:
+            _debug_log.append(msg)
+
     try:
         from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html_content, 'lxml')
-    except Exception:
+    except ImportError:
+        log("❌ beautifulsoup4 미설치")
         return {}
 
-    unit = _detect_unit(soup.get_text())
+    # ── 인코딩별 파싱 시도 ─────────────────────────────────────────────────────
+    soup = None
+    for parser in ["lxml", "html.parser"]:
+        try:
+            soup = BeautifulSoup(html_content, parser)
+            log(f"✅ HTML 파서: {parser}")
+            break
+        except Exception as e:
+            log(f"⚠️ {parser} 실패: {e}")
+    if soup is None:
+        return {}
 
-    # 계정명 키워드 (다양한 표현 커버)
+    full_text = soup.get_text()
+    unit = _detect_unit(full_text)
+    log(f"📐 단위 감지: {unit:,}원 단위")
+
+    # ── 계정명 키워드 매핑 ─────────────────────────────────────────────────────
     KWDS = {
-        "매출액":           ["매출액","수익(매출액)","영업수익","매출"],
-        "매출원가":         ["매출원가"],
-        "매출총이익":       ["매출총이익"],
-        "판관비":           ["판매비와관리비","판매비및관리비","판관비"],
-        "영업이익":         ["영업이익","영업손익"],
-        "당기순이익":       ["당기순이익","당기순손익"],
-        "자산총계":         ["자산총계"],
-        "현금및현금성자산": ["현금및현금성자산","현금과예금"],
-        "단기금융상품":     ["단기금융상품"],
-        "부채총계":         ["부채총계"],
-        "자본총계":         ["자본총계"],
-        "단기차입금":       ["단기차입금"],
-        "유동성장기차입금": ["유동성장기차입금","유동성장기부채"],
-        "장기차입금":       ["장기차입금"],
+        "매출액":           ["매출액","수익(매출액)","영업수익","총수익","매출"],
+        "매출원가":         ["매출원가","제품매출원가","상품매출원가"],
+        "매출총이익":       ["매출총이익","매출총손익"],
+        "판관비":           ["판매비와관리비","판매비및관리비","판관비","영업비용"],
+        "영업이익":         ["영업이익","영업손익","영업이익(손실)"],
+        "당기순이익":       ["당기순이익","당기순손익","당기순이익(손실)","분기순이익"],
+        "자산총계":         ["자산총계","자산합계"],
+        "현금및현금성자산": ["현금및현금성자산","현금및현금성자산(단기금융상품포함)",
+                             "현금과예금","현금및예금"],
+        "단기금융상품":     ["단기금융상품","단기투자자산","단기금융자산"],
+        "부채총계":         ["부채총계","부채합계"],
+        "자본총계":         ["자본총계","자본합계"],
+        "단기차입금":       ["단기차입금","단기차입"],
+        "유동성장기차입금": ["유동성장기차입금","유동성장기부채","유동성장기차입"],
+        "장기차입금":       ["장기차입금","장기차입"],
         "사채":             ["사채"],
-        "감가상각비":       ["감가상각비"],
-        "무형자산상각비":   ["무형자산상각비"],
+        "감가상각비":       ["감가상각비","유형자산감가상각비"],
+        "무형자산상각비":   ["무형자산상각비","무형자산의상각"],
     }
 
     results = {}
+    matched_tables = 0
 
-    for table in soup.find_all('table'):
-        for row in table.find_all('tr'):
-            cells = row.find_all(['td','th'])
+    for tbl_idx, table in enumerate(soup.find_all("table")):
+        tbl_text = table.get_text()
+        # 재무제표 테이블인지 간단 필터 (최소 2개 키워드 포함)
+        kw_hits = sum(1 for kw in ["매출","자산","부채","자본","이익"] if kw in tbl_text)
+        if kw_hits < 2:
+            continue
+        matched_tables += 1
+
+        for row in table.find_all("tr"):
+            cells = row.find_all(["td","th"])
             if len(cells) < 2:
                 continue
-            label = cells[0].get_text(strip=True).replace('\xa0','').replace(' ','')
+
+            raw_label = cells[0].get_text(strip=True)
+            label     = _clean_label(raw_label)
 
             for key, kwds in KWDS.items():
                 if key in results:
                     continue
-                if any(label == kw.replace(' ','') or
-                       label.startswith(kw.replace(' ',''))
-                       for kw in kwds):
-                    # 2~4번째 셀에서 첫 번째 유효 숫자 사용
-                    for cell in cells[1:4]:
+                # 완전 일치 우선, 그 다음 시작 일치
+                if any(label == kw.replace(" ","") for kw in kwds) or \
+                   any(label.startswith(kw.replace(" ","")) for kw in kwds):
+                    # 숫자 셀 탐색: 2번째~6번째 중 첫 번째 유효값
+                    for cell in cells[1:6]:
                         val = _extract_num(cell.get_text())
                         if val is not None and val != 0:
                             results[key] = val * unit
+                            log(f"  ✅ {key}: {val:,} × {unit:,} = {val*unit:,}")
                             break
 
+    log(f"📊 재무 테이블 {matched_tables}개 처리 → {len(results)}개 계정 추출")
+    if "매출액" not in results:
+        log("⚠️ '매출액' 미추출 — 테이블 구조가 예상과 다를 수 있음")
     return results
 
 
 def analyze_from_document(corp_code, year):
-    """XBRL 없는 경우: 공시 HTML 문서 파싱으로 재무 수치 추출"""
+    """XBRL 없는 경우: 공시 HTML 문서 파싱으로 재무 수치 추출 (디버그 로그 포함)"""
+    debug_log = [f"=== {year}년 문서파싱 시작 ==="]
+
     rcept_no, report_nm = find_filing_rcept_no(corp_code, year)
     if not rcept_no:
-        return None, None, "DART 공시 목록에서 감사/사업보고서를 찾지 못했습니다"
+        debug_log.append("❌ 공시 목록에서 감사/사업보고서를 찾지 못함")
+        return None, None, "DART 공시 없음", debug_log
+
+    debug_log.append(f"✅ 공시 발견: {report_nm} (rcept_no={rcept_no})")
 
     html = get_document_html(rcept_no)
     if not html:
-        return None, None, f"문서 다운로드 실패 (rcept_no={rcept_no})"
+        debug_log.append("❌ 문서 ZIP 다운로드 실패 또는 HTML 파일 없음")
+        return None, None, f"문서 다운로드 실패 (rcept_no={rcept_no})", debug_log
 
-    raw = parse_html_financials(html)
+    debug_log.append(f"✅ HTML 문서 수신: {len(html):,} bytes")
+
+    raw = parse_html_financials(html, _debug_log=debug_log)
     if not raw or "매출액" not in raw:
-        return None, None, f"재무데이터 파싱 실패 — 공시문서: {report_nm}"
+        debug_log.append(f"❌ 매출액 추출 실패 — 파싱된 항목: {list(raw.keys())}")
+        return None, None, f"재무데이터 파싱 실패", debug_log
 
     raw = compute_derived(raw)
     label = f"별도재무제표(문서파싱·{report_nm})" if report_nm else "별도재무제표(문서파싱)"
-    return raw, label, None
+    debug_log.append(f"✅ 파싱 완료: {len(raw)}개 항목")
+    return raw, label, None, debug_log
 
 
 # ── 메인 분석 함수 (XBRL → 문서파싱 순서로 시도) ─────────────────────────────
@@ -426,10 +479,11 @@ def analyze(corp_code, year, fs_preference="CFS"):
         for nm, ids in {**IS_IDS, **BS_IDS, **CF_IDS}.items():
             raw[nm] = find_val(df, ids) or find_by_name(df, nm)
         raw = compute_derived(raw)
-        return raw, used_fs_type, None
+        return raw, used_fs_type, None, []
 
     # ── 2순위: 공시 HTML 문서 파싱 (비상장 기업 대응) ─────────────────────────
-    return analyze_from_document(corp_code, year)
+    raw, label, err, dbg = analyze_from_document(corp_code, year)
+    return raw, label, err, dbg
 
 
 # ── 요약 테이블 생성 ──────────────────────────────────────────────────────────
@@ -520,24 +574,52 @@ if search_btn and q:
         else:
             st.error("오류: " + err)
 
-# 결과 테이블 — 행 클릭으로 즉시 선택
+# 결과 테이블 + 라디오 선택
 if "search_rows" in st.session_state:
     rows = st.session_state["search_rows"]
-    display_df = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")}
-                                for r in rows])
-    st.caption(f"🔍 {len(rows)}개 기업 검색됨 — 원하는 기업 행의 아무 곳이나 클릭하면 즉시 선택됩니다")
 
-    event = st.dataframe(display_df, use_container_width=True, hide_index=True,
-                         selection_mode="single-row", on_select="rerun", key="corp_table")
-    sel = event.selection.rows
-    if sel:
-        chosen = rows[sel[0]]
-        prev   = st.session_state.get("chosen_corp", {})
-        if prev.get("_corp_code") != chosen["_corp_code"]:
-            st.session_state["chosen_corp"] = chosen
-            st.session_state["step2_ready"] = True
-            st.session_state.pop("result", None)
-        st.success(f"✅ 선택: **{chosen['기업명']}** | {chosen['대표자']} | {chosen['상장구분']}")
+    # 헤더 + 구분선으로 테이블처럼 표시
+    st.caption(f"🔍 {len(rows)}개 기업 — 행을 클릭해서 선택하세요")
+
+    # 컬럼 헤더
+    hc = st.columns([0.3, 2.2, 1.5, 2.5, 1.2])
+    for col, header in zip(hc, ["", "기업명", "대표자", "업종", "상장구분"]):
+        col.markdown(f"**{header}**")
+    st.divider()
+
+    # 각 행을 radio 버튼 + 정보 컬럼으로 표시
+    options = [r["_corp_code"] for r in rows]
+    labels  = [r["기업명"] for r in rows]
+
+    # 현재 선택된 corp_code 찾기
+    prev_code = st.session_state.get("chosen_corp", {}).get("_corp_code")
+    default_idx = options.index(prev_code) if prev_code in options else 0
+
+    selected_code = None
+    for i, row in enumerate(rows):
+        rc = st.columns([0.3, 2.2, 1.5, 2.5, 1.2])
+        clicked = rc[0].button("●", key=f"sel_{i}",
+                               help="클릭해서 선택",
+                               use_container_width=True)
+        rc[1].write(row["기업명"])
+        rc[2].write(row["대표자"])
+        rc[3].write(row["업종"])
+        rc[4].write(row["상장구분"])
+        if clicked:
+            selected_code = row["_corp_code"]
+
+    if selected_code:
+        chosen = next(r for r in rows if r["_corp_code"] == selected_code)
+        st.session_state["chosen_corp"] = chosen
+        st.session_state["step2_ready"] = True
+        st.session_state.pop("result", None)
+        st.rerun()
+
+    # 현재 선택된 기업 표시
+    if st.session_state.get("chosen_corp"):
+        ch = st.session_state["chosen_corp"]
+        if ch["_corp_code"] in options:
+            st.success(f"✅ 선택됨: **{ch['기업명']}** | {ch['대표자']} | {ch['상장구분']}")
 
 st.divider()
 
@@ -574,15 +656,17 @@ if st.session_state.get("step2_ready"):
     st.caption(f"📅 {year_from}년 ~ {year_to}년 ({len(selected_years)}개 연도)")
 
     if st.button("📊 재무제표 출력", type="primary", use_container_width=True):
-        year_data, year_fstype = {}, {}
+        year_data, year_fstype, all_debug = {}, {}, {}
         prog = st.progress(0, text="데이터 수집 중...")
         for i, year in enumerate(selected_years):
-            d, fs_used, err = analyze(corp_code, year, fs_preference)
+            result = analyze(corp_code, year, fs_preference)
+            d, fs_used, err, dbg = result if len(result) == 4 else (*result, [])
+            all_debug[year] = dbg
             if d is not None:
                 year_data[year]   = d
                 year_fstype[year] = fs_used
             else:
-                st.warning(f"{year}년: 데이터 없음 ({err})")
+                st.warning(f"{year}년: {err}")
             prog.progress((i+1)/len(selected_years), text=f"{year}년 수집 완료")
         prog.empty()
         if year_data:
@@ -591,9 +675,15 @@ if st.session_state.get("step2_ready"):
                 "year_data":   year_data, "year_fstype": year_fstype,
                 "corp_name":   corp_name, "corp_code":   corp_code,
                 "mixed_fs":    any("연결" in f for f in fs_set) and any("별도" in f for f in fs_set),
+                "debug_log":   all_debug,
             }
         else:
-            st.error("조회된 데이터가 없습니다. DART에 공시된 재무제표가 없는 기업입니다.")
+            # 데이터 없음 + 디버그 정보 표시
+            st.error("조회된 데이터가 없습니다.")
+            for yr, log in all_debug.items():
+                if log:
+                    with st.expander(f"🔍 {yr}년 디버그 로그"):
+                        st.code("\n".join(log))
 
 st.divider()
 
@@ -617,6 +707,13 @@ if "result" in st.session_state:
     if doc_years:
         st.warning(f"📄 {', '.join(doc_years)}년은 XBRL 데이터가 없어 공시 HTML 문서를 파싱했습니다. "
                    "수치 정확성을 반드시 원문 감사보고서와 대조 확인하세요.")
+        debug_log = r.get("debug_log", {})
+        if debug_log:
+            with st.expander("🔍 문서 파싱 디버그 로그"):
+                for yr in doc_years:
+                    if yr in debug_log and debug_log[yr]:
+                        st.markdown(f"**{yr}년**")
+                        st.code("\n".join(debug_log[yr]))
 
     info = get_corp_info(corp_code_r)
     if info.get("status") == "000":
